@@ -35,8 +35,8 @@ mkdir -p debug/output
 echo "Running single sample debug..."
 uv run python debug/debug_single_sample.py \
     --config configs/LVSM_scene_decoder_only.yaml \
-    --checkpoint ckpts/lvsm_scene_decoder_only_res512.pt \
-    --dataset_path /home/junchen/scratch/datasets/re10k_new/test/full_list.txt \
+    --checkpoint ckpts/scene_decoder_only_256.pt \
+    --dataset_path /home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/test/full_list.txt \
     --sample_idx 0 \
     --output_dir debug/output
 

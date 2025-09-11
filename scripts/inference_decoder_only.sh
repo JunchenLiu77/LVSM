@@ -67,7 +67,7 @@ srun uv run python -W ignore::FutureWarning -W ignore::UserWarning -m torch.dist
     --rdzv_backend=c10d \
     inference.py \
     --config "configs/LVSM_scene_decoder_only.yaml" \
-    training.dataset_path="/home/junchen/scratch/datasets/re10k_new/test/full_list.txt" \
+    training.dataset_path="/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/test/full_list.txt" \
     training.checkpoint_dir="./ckpts/scene_decoder_only_256.pt" \
     training.batch_size_per_gpu=4 \
     training.target_has_input=false \
