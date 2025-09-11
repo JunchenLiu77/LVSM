@@ -138,3 +138,11 @@ dmypy.json
 *.lock
 .python-version
 
+# result folder
+results/
+
+# checkpoints folder
+ckpts
+
+# debug folder
+debug/
