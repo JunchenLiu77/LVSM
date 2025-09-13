@@ -3,9 +3,9 @@
 #SBATCH --account=aip-fsanja
 #SBATCH --output=results/train_%j.out
 #SBATCH --error=results/train_%j.err
-#SBATCH --time=02:00:00
+#SBATCH --time=00-04:00:00
 #SBATCH --nodes=1
-#SBATCH --mem=256GB
+#SBATCH --mem=48GB
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=l40s:4
 #SBATCH --ntasks-per-node=1
@@ -20,7 +20,7 @@
 
 # Parse arguments
 PROFILE_MODE=false
-TRAIN_STEPS=1000  # Default
+TRAIN_STEPS=1000
 TRAIN_SCRIPT="train.py"
 
 while [[ $# -gt 0 ]]; do
@@ -66,8 +66,6 @@ module load cuda/11.8
 
 # Environment variables
 export OMP_NUM_THREADS=2
-export NCCL_IB_DISABLE=1
-export NCCL_P2P_DISABLE=1
 export IBV_FORK_SAFE=1
 export MASTER_ADDR=localhost
 export MASTER_PORT=29502
@@ -92,8 +90,9 @@ echo
 echo "Starting training..."
 echo
 
-uv run torchrun \
+srun uv run torchrun \
     --nproc_per_node=4 \
+    --nnodes=1 \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
     $TRAIN_SCRIPT \

@@ -28,8 +28,6 @@ module load cuda/11.8
 # Environment variables (consistent with debug script)
 echo "Setting environment variables..."
 export OMP_NUM_THREADS=2
-export NCCL_IB_DISABLE=1
-export NCCL_P2P_DISABLE=1
 export IBV_FORK_SAFE=1
 
 # Single-node distributed setup
@@ -77,7 +75,7 @@ srun uv run python -W ignore::FutureWarning -W ignore::UserWarning -m torch.dist
     training.num_target_views=3 \
     inference.if_inference=true \
     inference.compute_metrics=true \
-    inference.render_video=true \
+    inference.render_video=false \
     inference_out_dir="./results/evaluation/test"
 
 # Capture exit code
