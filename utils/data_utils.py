@@ -81,7 +81,7 @@ class ProcessData(nn.Module):
 
         return ray_o, ray_d
     
-    def fetch_views(self, data_batch, has_target_image=False, target_has_input=True):
+    def fetch_views(self, data_batch, has_target_image=True, target_has_input=True):
         """
         Splits the input data batch into input and target sets.
         
@@ -90,6 +90,7 @@ class ProcessData(nn.Module):
                 - 'image' (torch.Tensor): Shape [b, v, c, h, w], optional for some target views
                 - 'fxfycxcy' (torch.Tensor): Shape [b, v, 4]
                 - 'c2w' (torch.Tensor): Shape [b, v, 4, 4]
+            has_target_image (bool): If True, target views have image supervision.
             target_has_input (bool): If True, target includes input views.
 
         Returns:
@@ -138,6 +139,7 @@ class ProcessData(nn.Module):
             expanded_index = index.view(index.shape[0], index.shape[1], *(1,) * len(to_expand_dim)).expand(-1, -1, *to_expand_dim)
 
             # Don't have target image supervision 
+            # JC: actually unused and useless, should be removed.
             if key == "image" and not has_target_image:                
                 continue
             else:
