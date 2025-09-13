@@ -97,14 +97,17 @@ if config.training.get("resume_ckpt", "") != "":
 else:
     ckpt_load_path = config.training.checkpoint_dir
 reset_training_state = config.training.get("reset_training_state", False)
-optimizer, lr_scheduler, cur_train_step, cur_param_update_step = auto_resume_job(
-    ckpt_load_path,
-    model,
-    optimizer,
-    lr_scheduler,
-    reset_training_state,
-)
 
+cur_train_step = 0
+cur_param_update_step = 0
+if config.training.get("resume_ckpt", "") != "":
+    optimizer, lr_scheduler, cur_train_step, cur_param_update_step = auto_resume_job(
+        ckpt_load_path,
+        model,
+        optimizer,
+        lr_scheduler,
+        reset_training_state,
+    )
 
 enable_grad_scaler = config.training.use_amp and config.training.amp_dtype == "fp16"
 scaler = torch.amp.GradScaler('cuda', enabled=enable_grad_scaler)
