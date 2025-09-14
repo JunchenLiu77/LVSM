@@ -127,6 +127,8 @@ class ProcessData(nn.Module):
             ], dtype=torch.long, device=data_batch["image"].device)
             index = torch.sort(index, dim=1).values # [b, num_target_views]
 
+        # append the input views to the target views
+        index = torch.cat([index, index[:, :self.config.training.num_input_views]], dim=1)
 
         for key, value in data_batch.items():
             if key == "scene_name":

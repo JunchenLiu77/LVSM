@@ -243,17 +243,25 @@ class Images2LatentScene(nn.Module):
             c=3
         )
         if has_target_image:
-            loss_metrics = self.loss_computer(
-                rendered_images,
-                target.image
+            # target view loss metrics
+            target_loss_metrics = self.loss_computer(
+                rendered_images[:, :v_target-v_input, ...],
+                target.image[:, :v_target-v_input, ...]
+            )
+            # input view loss metrics
+            input_loss_metrics = self.loss_computer(
+                rendered_images[:, v_target-v_input:, ...],
+                target.image[:, v_target-v_input:, ...]
             )
         else:
-            loss_metrics = None
+            target_loss_metrics = None
+            input_loss_metrics = None
 
         result = edict(
             input=input,
             target=target,
-            loss_metrics=loss_metrics,
+            input_loss_metrics=input_loss_metrics,
+            target_loss_metrics=target_loss_metrics,
             render=rendered_images        
             )
         

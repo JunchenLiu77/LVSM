@@ -145,9 +145,9 @@ while cur_train_step <= total_train_steps:
     update_grads = (cur_train_step + 1) % grad_accum_steps == 0 or cur_train_step == total_train_steps
     if update_grads:
         with model.no_sync(): # no sync grads for efficiency
-            scaler.scale(ret_dict.loss_metrics.loss / grad_accum_steps).backward()
+            scaler.scale(ret_dict.target_loss_metrics.loss / grad_accum_steps).backward()
     else:
-        scaler.scale(ret_dict.loss_metrics.loss / grad_accum_steps).backward()
+        scaler.scale(ret_dict.target_loss_metrics.loss / grad_accum_steps).backward()
     cur_train_step += 1
 
     export_inter_results = ((cur_train_step-1) == start_train_step) or (cur_train_step % config.training.vis_every == 0)
@@ -155,10 +155,10 @@ while cur_train_step <= total_train_steps:
     if update_grads:
         skip_optimizer_step = False
         # Skip optimizer step if loss is NaN or Inf
-        if torch.isnan(ret_dict.loss_metrics.loss) or torch.isinf(ret_dict.loss_metrics.loss):
+        if torch.isnan(ret_dict.target_loss_metrics.loss) or torch.isinf(ret_dict.target_loss_metrics.loss):
             print(f"NaN or Inf loss detected, skip this iteration")
             skip_optimizer_step = True
-            ret_dict.loss_metrics.loss.data = torch.zeros_like(ret_dict.loss_metrics.loss)
+            ret_dict.target_loss_metrics.loss.data = torch.zeros_like(ret_dict.target_loss_metrics.loss)
 
         total_grad_norm = None
         # Check gradient norm and update optimizer if everything is fine
@@ -208,13 +208,18 @@ while cur_train_step <= total_train_steps:
 
     # log and save checkpoint
     if ddp_info.is_main_process:
-        loss_dict = {k: float(f"{v.item():.6f}") for k, v in ret_dict.loss_metrics.items()}
+        target_loss_dict = {k: float(f"{v.item():.6f}") for k, v in ret_dict.target_loss_metrics.items()}
+        input_loss_dict = {k: float(f"{v.item():.6f}") for k, v in ret_dict.input_loss_metrics.items()}
         # print in console
         if (cur_train_step % config.training.print_every == 0) or (cur_train_step < 100 + start_train_step):
             print_str = f"[Epoch {int(cur_epoch):>3d}] | Forwad step: {int(cur_train_step):>6d} (Param update step: {int(cur_param_update_step):>6d})"
-            print_str += f" | Iter Time: {time.time() - tic:.2f}s | LR: {optimizer.param_groups[0]['lr']:.6f}\n"
+            print_str += f" | Iter Time: {time.time() - tic:.2f}s | LR: {optimizer.param_groups[0]['lr']:.6f}"
             # Add loss values
-            for k, v in loss_dict.items():
+            print_str += "\ntarget: "
+            for k, v in target_loss_dict.items():
+                print_str += f"target{k}: {v:.6f} | "
+            print_str += "\ninput: "
+            for k, v in input_loss_dict.items():
                 print_str += f"{k}: {v:.6f} | "
             print(print_str)
 
@@ -231,7 +236,8 @@ while cur_train_step <= total_train_steps:
                 "grad_norm": total_grad_norm,
                 "epoch": cur_epoch,
             }
-            log_dict.update({"train/" + k: v for k, v in loss_dict.items()})
+            log_dict.update({"train/target/" + k: v for k, v in target_loss_dict.items()})
+            log_dict.update({"train/input/" + k: v for k, v in input_loss_dict.items()})
             wandb.log(
                 log_dict,
                 step=cur_train_step,
