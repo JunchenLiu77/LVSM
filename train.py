@@ -217,7 +217,7 @@ while cur_train_step <= total_train_steps:
             # Add loss values
             print_str += "\ntarget: "
             for k, v in target_loss_dict.items():
-                print_str += f"target{k}: {v:.6f} | "
+                print_str += f"{k}: {v:.6f} | "
             print_str += "\ninput: "
             for k, v in input_loss_dict.items():
                 print_str += f"{k}: {v:.6f} | "
