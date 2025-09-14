@@ -55,6 +55,8 @@ def create_optimizer(model, weight_decay, learning_rate, betas):
             parts = name.split('.')
             if len(parts) > 2 and parts[0] == 'module':
                 return parts[1] + '.' + parts[2]
+            elif len(parts) > 1 and parts[0] == 'module':
+                return parts[1]
             return parts[0]  # Fallback to first part if no 'module.' prefix
         print(f'Optimizer: AdamW, learning rate: {learning_rate}, weight decay: {weight_decay}, betas: {betas}')
         # Number of parameters
