@@ -32,6 +32,20 @@ class Images2LatentScene(nn.Module):
 
         # Flag to track if we are in TTT mode to disable gradient checkpointing
         self._in_ttt_mode = False
+                # Count TTT parameters for logging
+        self.ttt_param_counts = {
+            'total_ttt_params': sum(p.numel() for block in self.ttt_blocks for p in block.parameters()),
+            'trainable_ttt_params': sum(p.numel() for block in self.ttt_blocks for p in block.parameters() if p.requires_grad),
+            'blocks': []
+        }
+        
+        for i, block in enumerate(self.ttt_blocks):
+            block_params = sum(p.numel() for p in block.parameters())
+            block_trainable = sum(p.numel() for p in block.parameters() if p.requires_grad)
+            self.ttt_param_counts['blocks'].append({
+                'total': block_params,
+                'trainable': block_trainable
+            })
 
     def _create_tokenizer(self, in_channels, patch_size, d_model):
         """Helper function to create a tokenizer with given config"""
@@ -267,9 +281,17 @@ class Images2LatentScene(nn.Module):
     def ttt_update(self, target, s):
         """
         Update the latent tokens with the TTT blocks.
+        Returns the updated state and TTT metrics for logging.
         """
         # Disable gradient checkpointing during TTT to avoid double differentiation
         self._in_ttt_mode = True
+        
+        # Initialize metrics collection
+        ttt_metrics = {
+            'initial_state_norm': torch.norm(s).item(),
+            'layers': []
+        }
+        
         for i in range(self.config.model.ttt.n_layer):
             # the last two views of target are input views, ugly but works
             # TODO: decoded more views (target views) which can be skipped.
@@ -279,15 +301,64 @@ class Images2LatentScene(nn.Module):
                 target.image[:,-2:, ...]
             )
             input_loss = input_loss_metrics["loss"]
+            
             grad_s = torch.autograd.grad(input_loss, s)[0]
+            
+            # Collect gradient statistics
+            grad_norm = torch.norm(grad_s).item()
+            grad_max = torch.max(torch.abs(grad_s)).item()
+            grad_mean = torch.mean(torch.abs(grad_s)).item()
+            
             grad_s = (grad_s - grad_s.mean(dim=(-2, -1), keepdim=True)) / (grad_s.std(dim=(-2, -1), keepdim=True) + 1e-6)
+            
             opt_input = torch.cat((s, grad_s), dim=-1) # [b, n_latent_vectors, 2*d]
             delta_s = self.ttt_blocks[i](opt_input) # [b, n_latent_vectors, d]
+            
+            # Collect TTT block output statistics
+            delta_s_norm = torch.norm(delta_s).item()
+            delta_s_max = torch.max(torch.abs(delta_s)).item()
+            delta_s_mean = torch.mean(torch.abs(delta_s)).item()
+            
+            # Calculate update statistics
+            s_norm = torch.norm(s).item()
+            delta_s_scaled_norm = torch.norm(delta_s * self.config.model.ttt.state_lr).item()
+            
+            # Relative update rates
+            relative_delta = delta_s_norm / (s_norm + 1e-8)
+            relative_update = delta_s_scaled_norm / (s_norm + 1e-8)
+            
+            # Apply update
             s = s + delta_s * self.config.model.ttt.state_lr
+            
+            # Log state change
+            s_new_norm = torch.norm(s).item()
+            state_change = abs(s_new_norm - s_norm) / (s_norm + 1e-8)
+            
+            # Collect layer metrics
+            layer_metrics = {
+                'input_loss': input_loss.item(),
+                'grad_norm': grad_norm,
+                'grad_max': grad_max,
+                'grad_mean': grad_mean,
+                'delta_s_norm': delta_s_norm,
+                'delta_s_max': delta_s_max,
+                'delta_s_mean': delta_s_mean,
+                'state_norm': s_norm,
+                'state_lr': self.config.model.ttt.state_lr,
+                'relative_delta': relative_delta,
+                'relative_update': relative_update,
+                'scaled_delta_norm': delta_s_scaled_norm,
+                'new_state_norm': s_new_norm,
+                'state_change': state_change
+            }
+            
+            ttt_metrics['layers'].append(layer_metrics)
             
         # Re-enable gradient checkpointing after TTT
         self._in_ttt_mode = False
-        return s
+        ttt_metrics['final_state_norm'] = torch.norm(s).item()
+        
+        return s, ttt_metrics
     
     
     def decode(self, target, latent_tokens):
@@ -335,7 +406,7 @@ class Images2LatentScene(nn.Module):
         v_input = input.image.size(1)
         v_target = target.image.size(1)
         latent_tokens = self.encode(input, target)
-        latent_tokens = self.ttt_update(target, latent_tokens)
+        latent_tokens, ttt_metrics = self.ttt_update(target, latent_tokens)
         rendered_images = self.decode(target, latent_tokens)
         
         if has_target_image:
@@ -358,7 +429,8 @@ class Images2LatentScene(nn.Module):
             target=target,
             input_loss_metrics=input_loss_metrics,
             target_loss_metrics=target_loss_metrics,
-            render=rendered_images        
+            render=rendered_images,
+            ttt_metrics=ttt_metrics,
         )
         
         return result

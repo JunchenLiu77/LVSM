@@ -21,7 +21,7 @@ model:
     n_latent_vectors: 3072 # 3x32x32
   ttt:
     n_layer: 3
-    state_lr: 1e-1
+    state_lr: 1e0
 
 training:
   # general

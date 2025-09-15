@@ -239,6 +239,52 @@ while cur_train_step <= total_train_steps:
             }
             log_dict.update({"train/target/" + k: v for k, v in target_loss_dict.items()})
             log_dict.update({"train/input/" + k: v for k, v in input_loss_dict.items()})
+
+            # Add TTT metrics to logging
+            if hasattr(ret_dict, 'ttt_metrics') and ret_dict.ttt_metrics is not None:
+                ttt_metrics = ret_dict.ttt_metrics
+                log_dict['ttt/initial_state_norm'] = ttt_metrics['initial_state_norm']
+                log_dict['ttt/final_state_norm'] = ttt_metrics['final_state_norm']
+                
+                # Log per-layer metrics
+                if 'layers' in ttt_metrics and len(ttt_metrics['layers']) > 0:
+                    for i, layer_metrics in enumerate(ttt_metrics['layers']):
+                        for key, value in layer_metrics.items():
+                            log_dict[f'ttt/layer_{i}/{key}'] = value
+                    
+                    # Average metrics across layers
+                    layer_keys = ttt_metrics['layers'][0].keys()
+                    for key in layer_keys:
+                        values = [layer[key] for layer in ttt_metrics['layers']]
+                        log_dict[f'ttt/avg_{key}'] = sum(values) / len(values)
+            
+            # Add TTT gradient metrics
+            if hasattr(model.module if hasattr(model, 'module') else model, 'ttt_blocks'):
+                ttt_blocks = (model.module if hasattr(model, 'module') else model).ttt_blocks
+                total_ttt_grad_norm = 0.0
+                for i, block in enumerate(ttt_blocks):
+                    block_grad_norm = 0.0
+                    max_grad = 0.0
+                    for name, param in block.named_parameters():
+                        if param.grad is not None:
+                            grad_norm = torch.norm(param.grad).item()
+                            block_grad_norm += grad_norm * grad_norm
+                            max_grad = max(max_grad, torch.max(torch.abs(param.grad)).item())
+                    
+                    if block_grad_norm > 0:
+                        block_grad_norm = block_grad_norm ** 0.5
+                        log_dict[f'ttt/grad/block_{i}_norm'] = block_grad_norm
+                        log_dict[f'ttt/grad/block_{i}_max'] = max_grad
+                        total_ttt_grad_norm += block_grad_norm * block_grad_norm
+                    else:
+                        log_dict[f'ttt/grad/block_{i}_norm'] = 0.0
+                        log_dict[f'ttt/grad/block_{i}_max'] = 0.0
+                
+                if total_ttt_grad_norm > 0:
+                    log_dict['ttt/grad/total_norm'] = (total_ttt_grad_norm ** 0.5)
+                else:
+                    log_dict['ttt/grad/total_norm'] = 0.0
+
             wandb.log(
                 log_dict,
                 step=cur_train_step,
