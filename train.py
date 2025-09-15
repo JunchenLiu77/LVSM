@@ -71,7 +71,7 @@ total_num_epochs = int(total_param_update_steps * total_batch_size / len(dataset
 module, class_name = config.model.class_name.rsplit(".", 1)
 LVSM = importlib.import_module(module).__dict__[class_name]
 model = LVSM(config).to(ddp_info.device)
-model = DDP(model, device_ids=[ddp_info.local_rank])
+model = DDP(model, device_ids=[ddp_info.local_rank], find_unused_parameters=True)
 
 
 optimizer, optimized_param_dict, all_param_dict = create_optimizer(
@@ -79,6 +79,7 @@ optimizer, optimized_param_dict, all_param_dict = create_optimizer(
     config.training.weight_decay,
     config.training.lr,
     (config.training.beta1, config.training.beta2),
+    is_ttt="ttt" in module,
 )
 optim_param_list = list(optimized_param_dict.values())
 

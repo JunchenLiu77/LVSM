@@ -29,7 +29,8 @@ class Generator:
     def __init__(self):
         self.model_config = {
             'decoder-only': 'configs/LVSM_scene_decoder_only.yaml',
-            'encoder-decoder': 'configs/LVSM_scene_encoder_decoder.yaml'
+            'encoder-decoder': 'configs/LVSM_scene_encoder_decoder.yaml',
+            "encoder-decoder-ttt": "configs/LVSM_scene_encoder_decoder_ttt.yaml"
         }
         
         # Default SLURM settings
@@ -104,6 +105,17 @@ class Generator:
                 overrides.append(f'model.transformer.decoder_n_layer={args.decoder_layers}')
             if args.n_latent:
                 overrides.append(f'model.transformer.n_latent_vectors={args.n_latent}')
+        elif args.model == 'encoder-decoder-ttt':
+            if args.encoder_layers:
+                overrides.append(f'model.transformer.encoder_n_layer={args.encoder_layers}')
+            if args.decoder_layers:
+                overrides.append(f'model.transformer.decoder_n_layer={args.decoder_layers}')
+            if args.n_latent:
+                overrides.append(f'model.transformer.n_latent_vectors={args.n_latent}')
+            if args.ttt_layers:
+                overrides.append(f'model.ttt.n_layer={args.ttt_layers}')
+            if args.state_lr:
+                overrides.append(f'model.ttt.state_lr={args.state_lr}')
         
         # Training configuration overrides
         if args.batch_size:
@@ -265,7 +277,7 @@ def main():
                         help='Dataset path')
     
     # Model selection
-    parser.add_argument('--model', choices=['decoder-only', 'encoder-decoder'], 
+    parser.add_argument('--model', choices=['decoder-only', 'encoder-decoder', 'encoder-decoder-ttt'], 
                         default='decoder-only',
                         help='Model architecture to use')
     
@@ -282,6 +294,10 @@ def main():
                         help='Number of decoder layers (encoder-decoder)')
     parser.add_argument('--n-latent', type=int,
                         help='Number of latent vectors (encoder-decoder)')
+    parser.add_argument('--ttt-layers', type=int,
+                        help='Number of TTT layers (encoder-decoder-ttt)')
+    parser.add_argument('--state-lr', type=float,
+                        help='TTT state learning rate (encoder-decoder-ttt)')
     
     # Training configuration
     parser.add_argument('--batch-size', type=int,

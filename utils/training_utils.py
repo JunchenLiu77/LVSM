@@ -30,11 +30,20 @@ def format_number(num):
         return f"{num / 1_000:.2f}K"
     return str(num)
 
-def create_optimizer(model, weight_decay, learning_rate, betas):
+def create_optimizer(model, weight_decay, learning_rate, betas, is_ttt=False):
     # start with all of the candidate parameters
     all_param_dict = {name: param for name, param in model.named_parameters()}
-    # filter out those that do not require grad
-    optimized_param_dict = {name: param for name, param in all_param_dict.items() if param.requires_grad}
+    if not is_ttt:
+        # filter out those that do not require grad
+        optimized_param_dict = {name: param for name, param in all_param_dict.items() if param.requires_grad}
+    else:
+        # if ttt, freeze the encoder and decoder parameters. For light_field_latent, we need to keed the gradient of it but
+        # dont update it through optimizer.
+        for name, param in all_param_dict.items():
+            if not "ttt" in name and not "light_field_latent" in name:
+                param.requires_grad = False
+        # only update ttt blocks
+        optimized_param_dict = {name: param for name, param in all_param_dict.items() if param.requires_grad and "ttt" in name}
 
     decay_params, nodecay_params = [], []
     for name, param in optimized_param_dict.items():
