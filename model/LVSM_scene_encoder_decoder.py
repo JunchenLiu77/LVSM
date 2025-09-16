@@ -238,7 +238,7 @@ class Images2LatentScene(nn.Module):
      
         encoder_input_tokens = torch.cat((latent_vector_tokens, input_img_tokens), dim=1) # [b, n_latent_vectors + v*n_patches, d]
 
-        intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=True, checkpoint_every=checkpoint_every)
+        intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
 
         latent_tokens, input_img_tokens = intermediate_tokens.split(
             [self.config.model.transformer.n_latent_vectors, v_input * n_patches], dim=1
@@ -257,7 +257,7 @@ class Images2LatentScene(nn.Module):
         decoder_input_tokens = torch.cat((target_pose_tokens, repeated_latent_tokens), dim=1) # [b*v_target, n_latent_vectors + n_patches, d]
         decoder_input_tokens = self.transformer_input_layernorm_decoder(decoder_input_tokens)
 
-        transformer_output_tokens = self.pass_layers(self.transformer_decoder, decoder_input_tokens, gradient_checkpoint=True, checkpoint_every=checkpoint_every)
+        transformer_output_tokens = self.pass_layers(self.transformer_decoder, decoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
 
         # Discard the latent tokens
         target_image_tokens, _ = transformer_output_tokens.split(

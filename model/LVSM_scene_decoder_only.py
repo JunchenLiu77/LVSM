@@ -220,7 +220,7 @@ class Images2LatentScene(nn.Module):
         transformer_input = torch.cat((repeated_input_img_tokens, target_pose_tokens), dim=1)  
         concat_img_tokens = self.transformer_input_layernorm(transformer_input)
         checkpoint_every = self.config.training.grad_checkpoint_every
-        transformer_output_tokens = self.pass_layers(concat_img_tokens, gradient_checkpoint=True, checkpoint_every=checkpoint_every)
+        transformer_output_tokens = self.pass_layers(concat_img_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
 
         # Discard the input tokens
         _, target_image_tokens = transformer_output_tokens.split(

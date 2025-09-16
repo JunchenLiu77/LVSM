@@ -37,7 +37,7 @@ class Generator:
         self.slurm_defaults = {
             'job_name': 'lvsm',
             'account': 'aip-fsanja',
-            'time': '00-02:00:00',
+            'time': '00-03:00:00',
             'nodes': 1,
             'mem': '48GB',
             'cpus_per_task': 8,
@@ -135,6 +135,8 @@ class Generator:
             
         if args.reset_training_state:
             overrides.append(f'training.reset_training_state=true')
+        elif args.no_reset_training_state:
+            overrides.append(f'training.reset_training_state=false')
         
         if args.wandb_exp_name:
             overrides.append(f'training.wandb_exp_name="{args.wandb_exp_name}"')
@@ -142,11 +144,18 @@ class Generator:
         # Inference mode
         if args.inference:
             overrides.append('inference.if_inference=true')
+        elif args.no_inference:
+            overrides.append('inference.if_inference=false')
         
         # AMP settings
         if args.amp_dtype:
             overrides.append(f'training.use_amp=true')
             overrides.append(f'training.amp_dtype={args.amp_dtype}')
+        
+        if args.grad_checkpoint:
+            overrides.append(f'training.grad_checkpoint=true')
+        elif args.no_grad_checkpoint:
+            overrides.append(f'training.grad_checkpoint=false')
         
         return overrides
     
@@ -245,7 +254,7 @@ echo "Configuration overrides:"'''
 echo
 
 # Run the training/inference
-srun uv run torchrun \\
+srun --time {slurm['time']} uv run torchrun \\
     --nproc_per_node={args.gpus or 4} \\
     --master_addr=$MASTER_ADDR \\
     --master_port=$MASTER_PORT \\
@@ -312,15 +321,21 @@ def main():
                         help='Checkpoint path to resume from')
     parser.add_argument('--reset-training-state', action='store_true',
                         help='Reset training state')
+    parser.add_argument('--no-reset-training-state', action='store_true',
+                        help='Do not reset training state')
     parser.add_argument('--wandb-exp-name', type=str,
                         help='WandB experiment name')
     parser.add_argument('--amp-dtype', choices=['bf16', 'fp16', 'fp32'],
                         help='AMP data type')
-    
+    parser.add_argument('--grad-checkpoint', action='store_true',
+                        help='Enable gradient checkpointing')
+    parser.add_argument('--no-grad-checkpoint', action='store_true',
+                        help='Disable gradient checkpointing')
     # Inference mode
     parser.add_argument('--inference', action='store_true',
                         help='Generate inference script instead of training')
-    
+    parser.add_argument('--no-inference', action='store_true',
+                        help='Generate training script instead of inference')
     # SLURM configuration
     parser.add_argument('--time', type=str,
                         help='Wall time limit (e.g., 00-02:00:00)')

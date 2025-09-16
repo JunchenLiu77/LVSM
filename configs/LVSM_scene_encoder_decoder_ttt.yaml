@@ -48,6 +48,7 @@ training:
 
   # loss & grad
   grad_accum_steps: 1
+  grad_checkpoint: true
   grad_checkpoint_every: 1
   grad_clip_norm: 1.0
   allowed_gradnorm_factor: 5
