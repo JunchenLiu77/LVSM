@@ -83,98 +83,98 @@ class Generator:
         # Checkpoint directory
         overrides.append(f'training.checkpoint_dir="{output_dir}"')
         
-        if args.dataset_path:
+        if args.dataset_path is not None:
             overrides.append(f'training.dataset_path="{args.dataset_path}"')
         
         # Model configuration overrides
-        if args.image_size:
+        if args.image_size is not None:
             overrides.append(f'model.image_tokenizer.image_size={args.image_size}')
             overrides.append(f'model.target_pose_tokenizer.image_size={args.image_size}')
         
-        if args.d_model:
+        if args.d_model is not None:
             overrides.append(f'model.transformer.d={args.d_model}')
         
         # Handle n_layer for different architectures
         if args.model == 'decoder-only':
-            if args.n_layers:
+            if args.n_layers is not None:
                 overrides.append(f'model.transformer.n_layer={args.n_layers}')
         elif args.model == 'encoder-decoder':
-            if args.encoder_layers:
+            if args.encoder_layers is not None:
                 overrides.append(f'model.transformer.encoder_n_layer={args.encoder_layers}')
-            if args.decoder_layers:
+            if args.decoder_layers is not None:
                 overrides.append(f'model.transformer.decoder_n_layer={args.decoder_layers}')
-            if args.n_latent:
+            if args.n_latent is not None:
                 overrides.append(f'model.transformer.n_latent_vectors={args.n_latent}')
         elif args.model == 'encoder-decoder-ttt':
-            if args.encoder_layers:
+            if args.encoder_layers is not None:
                 overrides.append(f'model.transformer.encoder_n_layer={args.encoder_layers}')
-            if args.decoder_layers:
+            if args.decoder_layers is not None:
                 overrides.append(f'model.transformer.decoder_n_layer={args.decoder_layers}')
-            if args.n_latent:
+            if args.n_latent is not None:
                 overrides.append(f'model.transformer.n_latent_vectors={args.n_latent}')
             if args.ttt_layers is not None:
                 overrides.append(f'model.ttt.n_layer={args.ttt_layers}')
-            if args.state_lr_mode:
+            if args.state_lr_mode is not None:
                 overrides.append(f'model.ttt.state_lr_mode={args.state_lr_mode}')
-            if args.state_lr_init:
+            if args.state_lr_init is not None:
                 overrides.append(f'model.ttt.state_lr_init={args.state_lr_init}')
-            if args.state_lr:
+            if args.state_lr is not None:
                 overrides.append(f'model.ttt.state_lr={args.state_lr}')
-            if args.opt_model:
+            if args.opt_model is not None:
                 overrides.append(f'model.ttt.opt_model={args.opt_model}')
-            if args.mlp_dim:
+            if args.mlp_dim is not None:
                 overrides.append(f'model.ttt.mlp_dim={args.mlp_dim}')
-            if args.use_positional_encoding:
+            if args.use_positional_encoding is not None:
                 overrides.append('model.ttt.use_positional_encoding=true')
-            elif args.no_positional_encoding:
+            elif args.no_positional_encoding is not None:
                 overrides.append('model.ttt.use_positional_encoding=false')
-            if args.freeze_encoder:
+            if args.freeze_encoder is not None:
                 overrides.append('model.ttt.freeze_encoder=true')
-            elif args.no_freeze_encoder:
+            elif args.no_freeze_encoder is not None:
                 overrides.append('model.ttt.freeze_encoder=false')
-            if args.freeze_decoder:
+            if args.freeze_decoder is not None:
                 overrides.append('model.ttt.freeze_decoder=true')
-            elif args.no_freeze_decoder:
+            elif args.no_freeze_decoder is not None:
                 overrides.append('model.ttt.freeze_decoder=false')
                 
         # Training configuration overrides
-        if args.batch_size:
+        if args.batch_size is not None:
             overrides.append(f'training.batch_size_per_gpu={args.batch_size}')
         
-        if args.steps:
+        if args.steps is not None:
             overrides.append(f'training.train_steps={args.steps}')
         
-        if args.lr:
+        if args.lr is not None:
             overrides.append(f'training.lr={args.lr}')
             
-        if args.warmup:
+        if args.warmup is not None:
             overrides.append(f'training.warmup={args.warmup}')
         
-        if args.resume_ckpt:
+        if args.resume_ckpt is not None:
             overrides.append(f'training.resume_ckpt="{args.resume_ckpt}"')
             
-        if args.reset_training_state:
+        if args.reset_training_state is not None:
             overrides.append(f'training.reset_training_state=true')
-        elif args.no_reset_training_state:
+        elif args.no_reset_training_state is not None:
             overrides.append(f'training.reset_training_state=false')
         
-        if args.wandb_exp_name:
+        if args.wandb_exp_name is not None:
             overrides.append(f'training.wandb_exp_name="{args.wandb_exp_name}"')
         
         # Inference mode
-        if args.inference:
+        if args.inference is not None:
             overrides.append('inference.if_inference=true')
-        elif args.no_inference:
+        elif args.no_inference is not None:
             overrides.append('inference.if_inference=false')
         
         # AMP settings
-        if args.amp_dtype:
+        if args.amp_dtype is not None:
             overrides.append(f'training.use_amp=true')
             overrides.append(f'training.amp_dtype={args.amp_dtype}')
         
-        if args.grad_checkpoint:
+        if args.grad_checkpoint is not None:
             overrides.append(f'training.grad_checkpoint=true')
-        elif args.no_grad_checkpoint:
+        elif args.no_grad_checkpoint is not None:
             overrides.append(f'training.grad_checkpoint=false')
         
         return overrides
@@ -184,23 +184,23 @@ class Generator:
         
         # Update SLURM settings based on arguments
         slurm = self.slurm_defaults.copy()
-        if args.time:
+        if args.time is not None:
             slurm['time'] = args.time
-        if args.nodes:
+        if args.nodes is not None:
             slurm['nodes'] = args.nodes
-        if args.gpus:
+        if args.gpus is not None:
             slurm['gpus_per_node'] = f'l40s:{args.gpus}'
-        if args.memory:
+        if args.memory is not None:
             slurm['mem'] = args.memory
-        if args.partition:
+        if args.partition is not None:
             slurm['partition'] = args.partition
         
         # Determine which Python script to use
-        if args.inference:
+        if args.inference is not None:
             torchrun_script = 'inference.py'
         else:   
             torchrun_script = 'train.py'
-            if args.profile:
+            if args.profile is not None:
                 torchrun_script = 'train_profiled.py'
         
         # Build the override string
