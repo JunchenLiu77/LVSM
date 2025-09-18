@@ -30,7 +30,8 @@ def format_number(num):
         return f"{num / 1_000:.2f}K"
     return str(num)
 
-def create_optimizer(model, weight_decay, learning_rate, betas, is_ttt=False):
+def create_optimizer(model, weight_decay, learning_rate, betas, is_ttt=False, freeze_encoder=True, freeze_decoder=True):
+    # if is_ttt, then 'freeze' parameters determine whether to freeze the encoder and decoder parameters.
     # start with all of the candidate parameters
     all_param_dict = {name: param for name, param in model.named_parameters()}
     if not is_ttt:
@@ -40,10 +41,16 @@ def create_optimizer(model, weight_decay, learning_rate, betas, is_ttt=False):
         # if ttt, freeze the encoder and decoder parameters. For light_field_latent, we need to keed the gradient of it but
         # dont update it through optimizer.
         for name, param in all_param_dict.items():
-            if not "ttt" in name and not "light_field_latent" in name:
+            if "ttt" in name or "light_field_latent" in name:
+                continue
+            if not freeze_encoder and "encoder" in name:
+                param.requires_grad = True
+            elif not freeze_decoder and "decoder" in name:
+                param.requires_grad = True
+            else:
                 param.requires_grad = False
         # only update ttt blocks
-        optimized_param_dict = {name: param for name, param in all_param_dict.items() if param.requires_grad and "ttt" in name}
+        optimized_param_dict = {name: param for name, param in all_param_dict.items() if param.requires_grad and "light_field_latent" not in name}
 
     decay_params, nodecay_params = [], []
     for name, param in optimized_param_dict.items():

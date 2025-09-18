@@ -112,7 +112,7 @@ class Generator:
                 overrides.append(f'model.transformer.decoder_n_layer={args.decoder_layers}')
             if args.n_latent:
                 overrides.append(f'model.transformer.n_latent_vectors={args.n_latent}')
-            if args.ttt_layers:
+            if args.ttt_layers is not None:
                 overrides.append(f'model.ttt.n_layer={args.ttt_layers}')
             if args.state_lr_mode:
                 overrides.append(f'model.ttt.state_lr_mode={args.state_lr_mode}')
@@ -128,7 +128,15 @@ class Generator:
                 overrides.append('model.ttt.use_positional_encoding=true')
             elif args.no_positional_encoding:
                 overrides.append('model.ttt.use_positional_encoding=false')
-        
+            if args.freeze_encoder:
+                overrides.append('model.ttt.freeze_encoder=true')
+            elif args.no_freeze_encoder:
+                overrides.append('model.ttt.freeze_encoder=false')
+            if args.freeze_decoder:
+                overrides.append('model.ttt.freeze_decoder=true')
+            elif args.no_freeze_decoder:
+                overrides.append('model.ttt.freeze_decoder=false')
+                
         # Training configuration overrides
         if args.batch_size:
             overrides.append(f'training.batch_size_per_gpu={args.batch_size}')
@@ -331,7 +339,15 @@ def main():
                         help='Enable positional encoding in TTT transformer (encoder-decoder-ttt)')
     parser.add_argument('--no-positional-encoding', action='store_true', default=None,
                         help='Disable positional encoding in TTT transformer (encoder-decoder-ttt)')
-                        
+    parser.add_argument('--freeze-encoder', action='store_true', default=None,
+                        help='Freeze encoder parameters (encoder-decoder-ttt)')
+    parser.add_argument('--no-freeze-encoder', action='store_true', default=None,
+                        help='Do not freeze encoder parameters (encoder-decoder-ttt)')
+    parser.add_argument('--freeze-decoder', action='store_true', default=None,
+                        help='Freeze decoder parameters (encoder-decoder-ttt)')
+    parser.add_argument('--no-freeze-decoder', action='store_true', default=None,
+                        help='Do not freeze decoder parameters (encoder-decoder-ttt)')
+
     # Training configuration
     parser.add_argument('--batch-size', type=int,
                         help='Batch size per GPU')
