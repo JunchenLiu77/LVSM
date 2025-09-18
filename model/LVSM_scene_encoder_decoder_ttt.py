@@ -32,12 +32,19 @@ class Images2LatentScene(nn.Module):
 
         # Flag to track if we are in TTT mode to disable gradient checkpointing
         self._in_ttt_mode = False
-                # Count TTT parameters for logging
+        
+        # Count TTT parameters for logging
         self.ttt_param_counts = {
             'total_ttt_params': sum(p.numel() for block in self.ttt_blocks for p in block.parameters()),
             'trainable_ttt_params': sum(p.numel() for block in self.ttt_blocks for p in block.parameters() if p.requires_grad),
             'blocks': []
         }
+        
+        # Add learnable state_lr parameters to the count if they exist
+        if hasattr(self, 'learnable_state_lr') and self.learnable_state_lr is not None:
+            for lr_param in self.learnable_state_lr:
+                self.ttt_param_counts['total_ttt_params'] += lr_param.numel()
+                self.ttt_param_counts['trainable_ttt_params'] += lr_param.numel() if lr_param.requires_grad else 0
         
         for i, block in enumerate(self.ttt_blocks):
             block_params = sum(p.numel() for p in block.parameters())
@@ -153,14 +160,17 @@ class Images2LatentScene(nn.Module):
         self.transformer_input_layernorm_decoder = nn.LayerNorm(config.d, bias=False)
 
     def _init_ttt(self):
-        # Initialize TTT blocks as a simple linear layer and a transformer block.
-        # TTT block take in concatenated state tokens and their gradients [b, n_latent_vectors, 2*d]
-        # and output the updated state tokens [b, n_latent_vectors, d]
         self.ttt_blocks = nn.ModuleList()
         for _ in range(self.config.model.ttt.n_layer):
+            # Instantiate TTT blocks as a simple MLP and a transformer block.
+            # TTT block take in concatenated state tokens and their gradients [b, n_latent_vectors, 2*d]
+            # and output the updated state tokens [b, n_latent_vectors, d]
             self.ttt_blocks.append(
                 nn.Sequential(
                     nn.Linear(self.config.model.transformer.d * 2, self.config.model.transformer.d, bias=False),
+                    nn.GELU(),
+                    nn.Linear(self.config.model.transformer.d, self.config.model.transformer.d, bias=False),
+                    nn.LayerNorm(self.config.model.transformer.d, bias=False),
                     QK_Norm_TransformerBlock(
                         self.config.model.transformer.d, self.config.model.transformer.d_head, use_qk_norm=False
                     )
@@ -169,9 +179,24 @@ class Images2LatentScene(nn.Module):
         for block in self.ttt_blocks:
             block.apply(init_weights)
         
-        # TODO: consider add one more linear layer
-        # TODO: consider layer norm
-        # TODO: consider initialization        
+        # Initialize state learning rate based on configuration
+        state_lr_mode = self.config.model.ttt.get('state_lr_mode', 'fixed')
+        
+        if state_lr_mode == 'learnable':
+            # Initialize learnable state_lr parameters for each TTT layer
+            self.learnable_state_lr = nn.ParameterList()
+            init_value = self.config.model.ttt.get('state_lr_init', -4.0)
+            
+            for _ in range(self.config.model.ttt.n_layer):
+                # Create a learnable gating vector with shape [D]
+                lr_param = nn.Parameter(torch.full((self.config.model.transformer.d,), init_value))
+                self.learnable_state_lr.append(lr_param)
+            
+            print(f"Initialized learnable state_lr with init_value={init_value}")
+        else:
+            # Use fixed state_lr from config
+            self.learnable_state_lr = None
+            print(f"Using fixed state_lr={self.config.model.ttt.state_lr}")
 
     def train(self, mode=True):
         """Override the train method to keep the loss computer in eval mode"""
@@ -280,8 +305,13 @@ class Images2LatentScene(nn.Module):
     
     def ttt_update(self, target, s):
         """
-        Update the latent tokens with the TTT blocks.
-        Returns the updated state and TTT metrics for logging.
+        Update the latent tokens with the TTT blocks. Returns the updated state and TTT metrics for logging.
+        Args:
+            target: Target data batch
+            s: Latent tokens [b, n_latent_vectors, d]
+        Returns:
+            s: Updated latent tokens [b, n_latent_vectors, d]
+            ttt_metrics: TTT metrics
         """
         # Disable gradient checkpointing during TTT to avoid double differentiation
         self._in_ttt_mode = True
@@ -309,7 +339,7 @@ class Images2LatentScene(nn.Module):
             grad_max = torch.max(torch.abs(grad_s)).item()
             grad_mean = torch.mean(torch.abs(grad_s)).item()
             
-            grad_s = (grad_s - grad_s.mean(dim=(-2, -1), keepdim=True)) / (grad_s.std(dim=(-2, -1), keepdim=True) + 1e-6)
+            grad_s = (grad_s - grad_s.mean(dim=(-2, -1), keepdim=True)) / (grad_s.std(dim=(-2, -1), keepdim=True) + 1e-6) # [b, n_latent_vectors, d]
             
             opt_input = torch.cat((s, grad_s), dim=-1) # [b, n_latent_vectors, 2*d]
             delta_s = self.ttt_blocks[i](opt_input) # [b, n_latent_vectors, d]
@@ -319,16 +349,34 @@ class Images2LatentScene(nn.Module):
             delta_s_max = torch.max(torch.abs(delta_s)).item()
             delta_s_mean = torch.mean(torch.abs(delta_s)).item()
             
+            # Get the effective state_lr for this layer
+            if self.learnable_state_lr is not None:
+                # Use learnable state_lr with sigmoid activation
+                state_lr = torch.sigmoid(self.learnable_state_lr[i])  # [D]
+                # Expand to match delta_s shape for element-wise multiplication
+                state_lr = state_lr.unsqueeze(0).unsqueeze(0)  # [1, 1, D]
+                effective_lr = state_lr  # This will be broadcasted
+                
+                # For metrics, use mean of the activated lr values
+                state_lr_value = torch.mean(state_lr).item()
+            else:
+                # Use fixed state_lr from config
+                state_lr_value = self.config.model.ttt.state_lr
+                effective_lr = state_lr_value
+            
             # Calculate update statistics
             s_norm = torch.norm(s).item()
-            delta_s_scaled_norm = torch.norm(delta_s * self.config.model.ttt.state_lr).item()
+            
+            # Apply update with effective learning rate
+            s_update = delta_s * effective_lr
+            delta_s_scaled_norm = torch.norm(s_update).item()
             
             # Relative update rates
             relative_delta = delta_s_norm / (s_norm + 1e-8)
             relative_update = delta_s_scaled_norm / (s_norm + 1e-8)
             
             # Apply update
-            s = s + delta_s * self.config.model.ttt.state_lr
+            s = s + s_update
             
             # Log state change
             s_new_norm = torch.norm(s).item()
@@ -344,13 +392,20 @@ class Images2LatentScene(nn.Module):
                 'delta_s_max': delta_s_max,
                 'delta_s_mean': delta_s_mean,
                 'state_norm': s_norm,
-                'state_lr': self.config.model.ttt.state_lr,
+                'state_lr': state_lr_value,
                 'relative_delta': relative_delta,
                 'relative_update': relative_update,
                 'scaled_delta_norm': delta_s_scaled_norm,
                 'new_state_norm': s_new_norm,
                 'state_change': state_change
             }
+            
+            # Add learnable lr statistics if applicable
+            if self.learnable_state_lr is not None:
+                activated_lr = torch.sigmoid(self.learnable_state_lr[i])
+                layer_metrics['state_lr_min'] = torch.min(activated_lr).item()
+                layer_metrics['state_lr_max'] = torch.max(activated_lr).item()
+                layer_metrics['state_lr_std'] = torch.std(activated_lr).item()
             
             ttt_metrics['layers'].append(layer_metrics)
             
@@ -605,5 +660,3 @@ class Images2LatentScene(nn.Module):
         
         self.load_state_dict(checkpoint["model"], strict=False)
         return 0
-
-

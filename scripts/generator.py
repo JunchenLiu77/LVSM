@@ -114,6 +114,10 @@ class Generator:
                 overrides.append(f'model.transformer.n_latent_vectors={args.n_latent}')
             if args.ttt_layers:
                 overrides.append(f'model.ttt.n_layer={args.ttt_layers}')
+            if args.state_lr_mode:
+                overrides.append(f'model.ttt.state_lr_mode={args.state_lr_mode}')
+            if args.state_lr_init:
+                overrides.append(f'model.ttt.state_lr_init={args.state_lr_init}')
             if args.state_lr:
                 overrides.append(f'model.ttt.state_lr={args.state_lr}')
         
@@ -305,6 +309,10 @@ def main():
                         help='Number of latent vectors (encoder-decoder)')
     parser.add_argument('--ttt-layers', type=int,
                         help='Number of TTT layers (encoder-decoder-ttt)')
+    parser.add_argument('--state-lr-mode', choices=['fixed', 'learnable'],
+                        help='State learning rate mode (encoder-decoder-ttt)')
+    parser.add_argument('--state-lr-init', type=float,
+                        help='Initial value for learnable state_lr (pre-sigmoid), only used when state_lr_mode is "learnable"')
     parser.add_argument('--state-lr', type=float,
                         help='TTT state learning rate (encoder-decoder-ttt)')
     
