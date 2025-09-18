@@ -162,20 +162,58 @@ class Images2LatentScene(nn.Module):
     def _init_ttt(self):
         self.ttt_blocks = nn.ModuleList()
         for _ in range(self.config.model.ttt.n_layer):
-            # Instantiate TTT blocks as a simple MLP and a transformer block.
-            # TTT block take in concatenated state tokens and their gradients [b, n_latent_vectors, 2*d]
-            # and output the updated state tokens [b, n_latent_vectors, d]
-            self.ttt_blocks.append(
-                nn.Sequential(
-                    nn.Linear(self.config.model.transformer.d * 2, self.config.model.transformer.d, bias=False),
-                    nn.GELU(),
-                    nn.Linear(self.config.model.transformer.d, self.config.model.transformer.d, bias=False),
-                    nn.LayerNorm(self.config.model.transformer.d, bias=False),
-                    QK_Norm_TransformerBlock(
-                        self.config.model.transformer.d, self.config.model.transformer.d_head, use_qk_norm=False
+            if self.config.model.ttt.get("opt_model", "mlp") == "mlp":
+                # Instantiate TTT blocks as a simple MLP
+                self.ttt_blocks.append(
+                    nn.Sequential(
+                        nn.Linear(self.config.model.transformer.d * 2, self.config.model.transformer.d * 4, bias=False),
+                        nn.GELU(),
+                        nn.Linear(self.config.model.transformer.d * 4, self.config.model.transformer.d, bias=False),
                     )
                 )
-            )
+                print("Initialized TTT blocks as a simple MLP")
+            elif self.config.model.ttt.get("opt_model", "mlp") == "flatten_mlp":
+                # Instantiate TTT blocks as a simple MLP, but flatten the input to perform global fusion.
+                self.ttt_blocks.append(
+                    nn.Sequential(
+                        # flatten the input [b, n_latent_vectors, 2*d] to [b, 2*d*n_latent_vectors]
+                        Rearrange(
+                            "b n d -> b (n d)",
+                            n=self.config.model.transformer.n_latent_vectors,
+                            d=self.config.model.transformer.d * 2
+                        ),
+                        nn.Linear(self.config.model.transformer.d * 2 * self.config.model.transformer.n_latent_vectors, self.config.model.ttt.mlp_dim, bias=False),
+                        nn.GELU(),
+                        nn.Linear(self.config.model.ttt.mlp_dim, self.config.model.transformer.d * self.config.model.transformer.n_latent_vectors, bias=False),
+                        # unflatten the output [b, d*n_latent_vectors] to [b, n_latent_vectors, d]
+                        Rearrange(
+                            "b (n d) -> b n d",
+                            n=self.config.model.transformer.n_latent_vectors,
+                            d=self.config.model.transformer.d
+                        ),
+                    )
+                )
+                print("Initialized TTT blocks as a simple MLP, but flatten the input to perform global fusion")
+            elif self.config.model.ttt.get("opt_model", "mlp") == "transformer":
+                # Instantiate TTT blocks as a simple MLP and a transformer block.
+                # TTT block take in concatenated state tokens and their gradients [b, n_latent_vectors, 2*d]
+                # and output the updated state tokens [b, n_latent_vectors, d]
+                self.ttt_blocks.append(
+                    nn.Sequential(
+                        nn.Linear(self.config.model.transformer.d * 2, self.config.model.transformer.d * 4, bias=False),
+                        nn.GELU(),
+                        nn.Linear(self.config.model.transformer.d * 4, self.config.model.transformer.d, bias=False),
+                        nn.LayerNorm(self.config.model.transformer.d, bias=False),
+                        QK_Norm_TransformerBlock(
+                            self.config.model.transformer.d,
+                            self.config.model.transformer.d_head,
+                            use_qk_norm=False,
+                            use_positional_encoding=self.config.model.ttt.get("use_positional_encoding", True)
+                        )
+                    )
+                )
+                print("Initialized TTT blocks as a simple MLP and a transformer block")
+        
         for block in self.ttt_blocks:
             block.apply(init_weights)
         

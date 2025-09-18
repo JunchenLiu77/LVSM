@@ -21,9 +21,12 @@ model:
     n_latent_vectors: 3072 # 3x32x32
   ttt:
     n_layer: 3
-    state_lr: 1e0  # Used when state_lr_mode is 'fixed'
-    state_lr_mode: learnable  # Options: 'fixed' or 'learnable'
-    state_lr_init: -4.0  # Initial value for learnable state_lr (pre-sigmoid), only used when state_lr_mode is 'learnable'
+    state_lr: 1e0
+    state_lr_mode: learnable
+    state_lr_init: -4.0
+    opt_model: transformer
+    mlp_dim: 3072
+    use_positional_encoding: true
 
 training:
   # general

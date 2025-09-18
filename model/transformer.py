@@ -41,6 +41,26 @@ class RMSNorm(nn.Module):
         return output * self.weight.type_as(x)
 
 
+class SinusoidalPositionalEncoding(nn.Module):
+    """Minimal sinusoidal positional encoding."""
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        import math
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1).float()
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-(math.log(10000.0) / d_model)))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        if d_model % 2 == 0:
+            pe[:, 1::2] = torch.cos(position * div_term)
+        else:
+            pe[:, 1::2] = torch.cos(position * div_term[:-1])
+        self.register_buffer("pe", pe.unsqueeze(0))  # [1, L, D]
+
+    def forward(self, x):  # x: [B, L, D]
+        L = x.size(1)
+        return x + self.pe[:, :L, :].to(x.dtype)
+
+
 
 class MLP(nn.Module):
     """
@@ -284,6 +304,8 @@ class QK_Norm_TransformerBlock(nn.Module):
         mlp_bias=False,
         mlp_dropout=0.0,
         use_qk_norm=True,
+        use_positional_encoding=False,
+        max_seq_len=5000,
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim, bias=ln_bias)
@@ -297,6 +319,9 @@ class QK_Norm_TransformerBlock(nn.Module):
             use_qk_norm=use_qk_norm,
         )
 
+        # Optional positional encoding (absolute sinusoidal)
+        self.posenc = SinusoidalPositionalEncoding(dim, max_seq_len) if use_positional_encoding else nn.Identity()
+
         self.norm2 = nn.LayerNorm(dim, bias=ln_bias)
         self.mlp = MLP(
             dim=dim,
@@ -307,6 +332,7 @@ class QK_Norm_TransformerBlock(nn.Module):
 
 
     def forward(self, x):
+        x = self.posenc(x)
         x = x + self.attn(self.norm1(x))
         x = x + self.mlp(self.norm2(x))
         return x

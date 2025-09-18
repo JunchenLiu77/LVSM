@@ -120,6 +120,14 @@ class Generator:
                 overrides.append(f'model.ttt.state_lr_init={args.state_lr_init}')
             if args.state_lr:
                 overrides.append(f'model.ttt.state_lr={args.state_lr}')
+            if args.opt_model:
+                overrides.append(f'model.ttt.opt_model={args.opt_model}')
+            if args.mlp_dim:
+                overrides.append(f'model.ttt.mlp_dim={args.mlp_dim}')
+            if args.use_positional_encoding:
+                overrides.append('model.ttt.use_positional_encoding=true')
+            elif args.no_positional_encoding:
+                overrides.append('model.ttt.use_positional_encoding=false')
         
         # Training configuration overrides
         if args.batch_size:
@@ -315,7 +323,15 @@ def main():
                         help='Initial value for learnable state_lr (pre-sigmoid), only used when state_lr_mode is "learnable"')
     parser.add_argument('--state-lr', type=float,
                         help='TTT state learning rate (encoder-decoder-ttt)')
-    
+    parser.add_argument('--opt-model', choices=['mlp', 'transformer', 'flatten_mlp'],
+                        help='TTT optimization model (encoder-decoder-ttt)')
+    parser.add_argument('--mlp-dim', type=int,
+                        help='TTT MLP dimension (encoder-decoder-ttt)')
+    parser.add_argument('--use-positional-encoding', action='store_true', default=None,
+                        help='Enable positional encoding in TTT transformer (encoder-decoder-ttt)')
+    parser.add_argument('--no-positional-encoding', action='store_true', default=None,
+                        help='Disable positional encoding in TTT transformer (encoder-decoder-ttt)')
+                        
     # Training configuration
     parser.add_argument('--batch-size', type=int,
                         help='Batch size per GPU')
