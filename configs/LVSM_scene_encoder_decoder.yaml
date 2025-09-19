@@ -59,7 +59,8 @@ training:
   weight_decay: 0.05
   beta1: 0.9
   beta2: 0.95
-
+  scheduler_type: constant
+  
   # resume & checkpoint
   resume_ckpt: ""
   reset_training_state: false
@@ -73,7 +74,7 @@ training:
   # wandb
   api_key_path: ./configs/api_keys.yaml
   wandb_exp_name: LVSM_scene_encoder_decoder
-  wandb_project: LVSM
+  wandb_project: LVSM_r2
 
   # logging
   print_every: 20
