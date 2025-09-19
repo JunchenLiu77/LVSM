@@ -82,6 +82,8 @@ optimizer, optimized_param_dict, all_param_dict = create_optimizer(
     is_ttt="ttt" in module,
     freeze_encoder=config.model.ttt.get("freeze_encoder", True),
     freeze_decoder=config.model.ttt.get("freeze_decoder", True),
+    freeze_tokenizer=config.model.ttt.get("freeze_tokenizer", True),
+    freeze_latent=config.model.ttt.get("freeze_latent", True),
 )
 optim_param_list = list(optimized_param_dict.values())
 

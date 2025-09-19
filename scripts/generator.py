@@ -124,19 +124,27 @@ class Generator:
                 overrides.append(f'model.ttt.opt_model={args.opt_model}')
             if args.mlp_dim is not None:
                 overrides.append(f'model.ttt.mlp_dim={args.mlp_dim}')
-            if args.use_positional_encoding is not None:
+            if args.use_positional_encoding is not None and args.use_positional_encoding:
                 overrides.append('model.ttt.use_positional_encoding=true')
-            elif args.no_positional_encoding is not None:
+            elif args.no_positional_encoding is not None and args.no_positional_encoding:
                 overrides.append('model.ttt.use_positional_encoding=false')
-            if args.freeze_encoder is not None:
-                overrides.append('model.ttt.freeze_encoder=true')
-            elif args.no_freeze_encoder is not None:
+            if args.freeze_encoder is not None and args.freeze_encoder:
+                overrides.append('model.ttt.freeze_encoder=true')   
+            elif args.no_freeze_encoder is not None and args.no_freeze_encoder:
                 overrides.append('model.ttt.freeze_encoder=false')
-            if args.freeze_decoder is not None:
+            if args.freeze_decoder is not None and args.freeze_decoder:
                 overrides.append('model.ttt.freeze_decoder=true')
-            elif args.no_freeze_decoder is not None:
+            elif args.no_freeze_decoder is not None and args.no_freeze_decoder:
                 overrides.append('model.ttt.freeze_decoder=false')
-                
+            if args.freeze_tokenizer is not None and args.freeze_tokenizer:
+                overrides.append('model.ttt.freeze_tokenizer=true')
+            elif args.no_freeze_tokenizer is not None and args.no_freeze_tokenizer:
+                overrides.append('model.ttt.freeze_tokenizer=false')
+            if args.freeze_latent is not None and args.freeze_latent:
+                overrides.append('model.ttt.freeze_latent=true')
+            elif args.no_freeze_latent is not None and args.no_freeze_latent:
+                overrides.append('model.ttt.freeze_latent=false')
+        
         # Training configuration overrides
         if args.batch_size is not None:
             overrides.append(f'training.batch_size_per_gpu={args.batch_size}')
@@ -153,28 +161,28 @@ class Generator:
         if args.resume_ckpt is not None:
             overrides.append(f'training.resume_ckpt="{args.resume_ckpt}"')
             
-        if args.reset_training_state is not None:
+        if args.reset_training_state is not None and args.reset_training_state:
             overrides.append(f'training.reset_training_state=true')
-        elif args.no_reset_training_state is not None:
+        elif args.no_reset_training_state is not None and args.no_reset_training_state:
             overrides.append(f'training.reset_training_state=false')
         
         if args.wandb_exp_name is not None:
             overrides.append(f'training.wandb_exp_name="{args.wandb_exp_name}"')
         
         # Inference mode
-        if args.inference is not None:
+        if args.inference is not None and args.inference:
             overrides.append('inference.if_inference=true')
-        elif args.no_inference is not None:
+        elif args.no_inference is not None and args.no_inference:
             overrides.append('inference.if_inference=false')
         
         # AMP settings
-        if args.amp_dtype is not None:
+        if args.amp_dtype is not None and args.amp_dtype:
             overrides.append(f'training.use_amp=true')
             overrides.append(f'training.amp_dtype={args.amp_dtype}')
         
-        if args.grad_checkpoint is not None:
+        if args.grad_checkpoint is not None and args.grad_checkpoint:
             overrides.append(f'training.grad_checkpoint=true')
-        elif args.no_grad_checkpoint is not None:
+        elif args.no_grad_checkpoint is not None and args.no_grad_checkpoint:
             overrides.append(f'training.grad_checkpoint=false')
         
         return overrides
@@ -347,6 +355,14 @@ def main():
                         help='Freeze decoder parameters (encoder-decoder-ttt)')
     parser.add_argument('--no-freeze-decoder', action='store_true', default=None,
                         help='Do not freeze decoder parameters (encoder-decoder-ttt)')
+    parser.add_argument('--freeze-tokenizer', action='store_true', default=None,
+                        help='Freeze tokenizer parameters (encoder-decoder-ttt)')
+    parser.add_argument('--no-freeze-tokenizer', action='store_true', default=None,
+                        help='Do not freeze tokenizer parameters (encoder-decoder-ttt)')
+    parser.add_argument('--freeze-latent', action='store_true', default=None,
+                        help='Freeze latent parameters (encoder-decoder-ttt)')
+    parser.add_argument('--no-freeze-latent', action='store_true', default=None,
+                        help='Do not freeze latent parameters (encoder-decoder-ttt)')
 
     # Training configuration
     parser.add_argument('--batch-size', type=int,
@@ -359,22 +375,22 @@ def main():
                         help='Warmup steps')
     parser.add_argument('--resume-ckpt', type=str,
                         help='Checkpoint path to resume from')
-    parser.add_argument('--reset-training-state', action='store_true',
+    parser.add_argument('--reset-training-state', action='store_true', default=None,
                         help='Reset training state')
-    parser.add_argument('--no-reset-training-state', action='store_true',
+    parser.add_argument('--no-reset-training-state', action='store_true', default=None,
                         help='Do not reset training state')
     parser.add_argument('--wandb-exp-name', type=str,
                         help='WandB experiment name')
     parser.add_argument('--amp-dtype', choices=['bf16', 'fp16', 'fp32'],
                         help='AMP data type')
-    parser.add_argument('--grad-checkpoint', action='store_true',
+    parser.add_argument('--grad-checkpoint', action='store_true', default=None,
                         help='Enable gradient checkpointing')
-    parser.add_argument('--no-grad-checkpoint', action='store_true',
+    parser.add_argument('--no-grad-checkpoint', action='store_true', default=None,
                         help='Disable gradient checkpointing')
     # Inference mode
-    parser.add_argument('--inference', action='store_true',
+    parser.add_argument('--inference', action='store_true', default=None,
                         help='Generate inference script instead of training')
-    parser.add_argument('--no-inference', action='store_true',
+    parser.add_argument('--no-inference', action='store_true', default=None,
                         help='Generate training script instead of inference')
     # SLURM configuration
     parser.add_argument('--time', type=str,
@@ -389,11 +405,11 @@ def main():
                         help='SLURM partition')
     
     # Other options
-    parser.add_argument('--profile', action='store_true',
+    parser.add_argument('--profile', action='store_true', default=None,
                         help='Enable profiling mode')
-    parser.add_argument('--dry-run', action='store_true',
+    parser.add_argument('--dry-run', action='store_true', default=None,
                         help='Print script without saving')
-    parser.add_argument('--submit', action='store_true',
+    parser.add_argument('--submit', action='store_true', default=None,
                         help='Submit the job immediately after generation')
     
     args = parser.parse_args()

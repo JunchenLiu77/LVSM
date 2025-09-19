@@ -30,7 +30,7 @@ def format_number(num):
         return f"{num / 1_000:.2f}K"
     return str(num)
 
-def create_optimizer(model, weight_decay, learning_rate, betas, is_ttt=False, freeze_encoder=True, freeze_decoder=True):
+def create_optimizer(model, weight_decay, learning_rate, betas, is_ttt=False, freeze_encoder=True, freeze_decoder=True, freeze_tokenizer=True, freeze_latent=True):
     # if is_ttt, then 'freeze' parameters determine whether to freeze the encoder and decoder parameters.
     # start with all of the candidate parameters
     all_param_dict = {name: param for name, param in model.named_parameters()}
@@ -43,14 +43,14 @@ def create_optimizer(model, weight_decay, learning_rate, betas, is_ttt=False, fr
         for name, param in all_param_dict.items():
             if "ttt" in name or "light_field_latent" in name:
                 continue
-            if not freeze_encoder and "encoder" in name:
-                param.requires_grad = True
-            elif not freeze_decoder and "decoder" in name:
+            if (not freeze_encoder and "encoder" in name) or \
+                (not freeze_decoder and "decoder" in name) or \
+                (not freeze_tokenizer and "tokenizer" in name):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
         # only update ttt blocks
-        optimized_param_dict = {name: param for name, param in all_param_dict.items() if param.requires_grad and "light_field_latent" not in name}
+        optimized_param_dict = {name: param for name, param in all_param_dict.items() if param.requires_grad and ("light_field_latent" not in name or not freeze_latent)}
 
     decay_params, nodecay_params = [], []
     for name, param in optimized_param_dict.items():

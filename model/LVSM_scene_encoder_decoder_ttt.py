@@ -41,8 +41,8 @@ class Images2LatentScene(nn.Module):
         }
         
         # Add learnable state_lr parameters to the count if they exist
-        if hasattr(self, 'learnable_state_lr') and self.learnable_state_lr is not None:
-            for lr_param in self.learnable_state_lr:
+        if hasattr(self, 'ttt_learnable_state_lr') and self.ttt_learnable_state_lr is not None:
+            for lr_param in self.ttt_learnable_state_lr:
                 self.ttt_param_counts['total_ttt_params'] += lr_param.numel()
                 self.ttt_param_counts['trainable_ttt_params'] += lr_param.numel() if lr_param.requires_grad else 0
         
@@ -222,18 +222,18 @@ class Images2LatentScene(nn.Module):
         
         if state_lr_mode == 'learnable':
             # Initialize learnable state_lr parameters for each TTT layer
-            self.learnable_state_lr = nn.ParameterList()
+            self.ttt_learnable_state_lr = nn.ParameterList()
             init_value = self.config.model.ttt.get('state_lr_init', -4.0)
             
             for _ in range(self.config.model.ttt.n_layer):
                 # Create a learnable gating vector with shape [D]
                 lr_param = nn.Parameter(torch.full((self.config.model.transformer.d,), init_value))
-                self.learnable_state_lr.append(lr_param)
+                self.ttt_learnable_state_lr.append(lr_param)
             
             print(f"Initialized learnable state_lr with init_value={init_value}")
         else:
             # Use fixed state_lr from config
-            self.learnable_state_lr = None
+            self.ttt_learnable_state_lr = None
             print(f"Using fixed state_lr={self.config.model.ttt.state_lr}")
 
     def train(self, mode=True):
@@ -388,9 +388,9 @@ class Images2LatentScene(nn.Module):
             delta_s_mean = torch.mean(torch.abs(delta_s)).item()
             
             # Get the effective state_lr for this layer
-            if self.learnable_state_lr is not None:
+            if self.ttt_learnable_state_lr is not None:
                 # Use learnable state_lr with sigmoid activation
-                state_lr = torch.sigmoid(self.learnable_state_lr[i])  # [D]
+                state_lr = torch.sigmoid(self.ttt_learnable_state_lr[i])  # [D]
                 # Expand to match delta_s shape for element-wise multiplication
                 state_lr = state_lr.unsqueeze(0).unsqueeze(0)  # [1, 1, D]
                 effective_lr = state_lr  # This will be broadcasted
@@ -439,8 +439,8 @@ class Images2LatentScene(nn.Module):
             }
             
             # Add learnable lr statistics if applicable
-            if self.learnable_state_lr is not None:
-                activated_lr = torch.sigmoid(self.learnable_state_lr[i])
+            if self.ttt_learnable_state_lr is not None:
+                activated_lr = torch.sigmoid(self.ttt_learnable_state_lr[i])
                 layer_metrics['state_lr_min'] = torch.min(activated_lr).item()
                 layer_metrics['state_lr_max'] = torch.max(activated_lr).item()
                 layer_metrics['state_lr_std'] = torch.std(activated_lr).item()

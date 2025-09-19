@@ -29,6 +29,8 @@ model:
     use_positional_encoding: true
     freeze_encoder: true
     freeze_decoder: true
+    freeze_tokenizer: true
+    freeze_latent: true
 
 training:
   # general
