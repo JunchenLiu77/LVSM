@@ -78,8 +78,14 @@ training:
   print_every: 20
   wandb_log_every: 50
   vis_every: 1000
-  checkpoint_every: 2000
+  checkpoint_every: 1000
   log_grad_norm_details: false
+
+  # freeze parameters
+  freeze_encoder: false
+  freeze_decoder: false
+  freeze_tokenizer: false
+  freeze_latent: false
 
 
 # inference / evaluation

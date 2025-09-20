@@ -41,7 +41,7 @@ class Generator:
             'nodes': 1,
             'mem': '48GB',
             'cpus_per_task': 8,
-            'gpus_per_node': 'l40s:4',
+            'gpus_per_node': 'l40s:2',
             'partition': 'gpubase_l40s_b1'
         }
         
@@ -239,7 +239,7 @@ echo "LVSM {'Inference' if args.inference else 'Training'} - {args.model.upper()
 echo "=============================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURMD_NODENAME"
-echo "GPUs: {args.gpus or 4}x L40s"
+echo "GPUs: {args.gpus or 2}x L40s"
 echo "Start time: $(date)"
 echo "Default Config: {config_file}"
 echo "=============================================="
@@ -250,7 +250,7 @@ module load StdEnv/2023 intel/2023.2.1
 module load cuda/11.8
 
 # Environment variables
-export OMP_NUM_THREADS=2
+export OMP_NUM_THREADS=4
 export IBV_FORK_SAFE=1
 export MASTER_ADDR=localhost
 export MASTER_PORT=29502
@@ -283,7 +283,7 @@ echo
 
 # Run the training/inference
 srun --time {slurm['time']} uv run torchrun \\
-    --nproc_per_node={args.gpus or 4} \\
+    --nproc_per_node={args.gpus or 2} \\
     --master_addr=$MASTER_ADDR \\
     --master_port=$MASTER_PORT \\
     {torchrun_script} \\
