@@ -370,22 +370,26 @@ class Images2LatentScene(nn.Module):
             )
             input_loss = input_loss_metrics["loss"]
             
-            grad_s = torch.autograd.grad(input_loss, s)[0]
-            
+            if self.config.model.ttt["grad_mode"] == "normal":
+                grad_s = torch.autograd.grad(input_loss, s)[0]
+                grad_s = (grad_s - grad_s.mean(dim=(-2, -1), keepdim=True)) / (grad_s.std(dim=(-2, -1), keepdim=True) + 1e-6) # [b, n_latent_vectors, d]
+            elif self.config.model.ttt["grad_mode"] == "zero":
+                grad_s = torch.zeros_like(s)
+            elif self.config.model.ttt["grad_mode"] == "random":
+                grad_s = torch.randn_like(s)
+
             # Collect gradient statistics
-            grad_norm = torch.norm(grad_s).item()
             grad_max = torch.max(torch.abs(grad_s)).item()
             grad_mean = torch.mean(torch.abs(grad_s)).item()
-            
-            grad_s = (grad_s - grad_s.mean(dim=(-2, -1), keepdim=True)) / (grad_s.std(dim=(-2, -1), keepdim=True) + 1e-6) # [b, n_latent_vectors, d]
+            grad_std = torch.std(grad_s).item()
             
             opt_input = torch.cat((s, grad_s), dim=-1) # [b, n_latent_vectors, 2*d]
             delta_s = self.ttt_blocks[i](opt_input) # [b, n_latent_vectors, d]
             
             # Collect TTT block output statistics
-            delta_s_norm = torch.norm(delta_s).item()
             delta_s_max = torch.max(torch.abs(delta_s)).item()
             delta_s_mean = torch.mean(torch.abs(delta_s)).item()
+            delta_s_std = torch.std(delta_s).item()
             
             # Get the effective state_lr for this layer
             if self.ttt_learnable_state_lr is not None:
@@ -402,40 +406,28 @@ class Images2LatentScene(nn.Module):
                 state_lr_value = self.config.model.ttt.state_lr
                 effective_lr = state_lr_value
             
-            # Calculate update statistics
-            s_norm = torch.norm(s).item()
-            
             # Apply update with effective learning rate
             s_update = delta_s * effective_lr
-            delta_s_scaled_norm = torch.norm(s_update).item()
             
             # Relative update rates
-            relative_delta = delta_s_norm / (s_norm + 1e-8)
-            relative_update = delta_s_scaled_norm / (s_norm + 1e-8)
+            relative_delta = (delta_s / (s + 1e-8)).mean().item()
+            relative_update = (s_update / (s + 1e-8)).mean().item()
             
             # Apply update
             s = s + s_update
             
-            # Log state change
-            s_new_norm = torch.norm(s).item()
-            state_change = abs(s_new_norm - s_norm) / (s_norm + 1e-8)
-            
             # Collect layer metrics
             layer_metrics = {
                 'input_loss': input_loss.item(),
-                'grad_norm': grad_norm,
                 'grad_max': grad_max,
                 'grad_mean': grad_mean,
-                'delta_s_norm': delta_s_norm,
+                'grad_std': grad_std,
                 'delta_s_max': delta_s_max,
                 'delta_s_mean': delta_s_mean,
-                'state_norm': s_norm,
+                'delta_s_std': delta_s_std,
                 'state_lr': state_lr_value,
                 'relative_delta': relative_delta,
                 'relative_update': relative_update,
-                'scaled_delta_norm': delta_s_scaled_norm,
-                'new_state_norm': s_new_norm,
-                'state_change': state_change
             }
             
             # Add learnable lr statistics if applicable
@@ -482,9 +474,7 @@ class Images2LatentScene(nn.Module):
         rendered_images = self.image_token_decoder(target_image_tokens)
         height, width = target.image_h_w
         patch_size = self.config.model.target_pose_tokenizer.patch_size
-        rendered_images = rearrange(
-            rendered_images, "(b v) (h w) (p1 p2 c) -> b v c (h p1) (w p2)",
-            v=v_target,
+        rendered_ima2333333333333w112t,
             h=height // patch_size, 
             w=width // patch_size, 
             p1=patch_size, 

@@ -27,10 +27,7 @@ model:
     opt_model: transformer
     mlp_dim: 3072
     use_positional_encoding: true
-    freeze_encoder: true
-    freeze_decoder: true
-    freeze_tokenizer: true
-    freeze_latent: true
+    grad_mode: normal
 
 training:
   # general

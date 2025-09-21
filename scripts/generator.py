@@ -144,6 +144,8 @@ class Generator:
                 overrides.append('model.ttt.freeze_latent=true')
             elif args.no_freeze_latent is not None and args.no_freeze_latent:
                 overrides.append('model.ttt.freeze_latent=false')
+            if args.grad_mode is not None:
+                overrides.append(f'model.ttt.grad_mode={args.grad_mode}')
         
         # Training configuration overrides
         if args.batch_size is not None:
@@ -387,6 +389,8 @@ def main():
                         help='Enable gradient checkpointing')
     parser.add_argument('--no-grad-checkpoint', action='store_true', default=None,
                         help='Disable gradient checkpointing')
+    parser.add_argument('--grad-mode', choices=['normal', 'zero', 'random'], default='normal',
+                        help='Gradient mode (encoder-decoder-ttt)')
     # Inference mode
     parser.add_argument('--inference', action='store_true', default=None,
                         help='Generate inference script instead of training')
