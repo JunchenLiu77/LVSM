@@ -49,8 +49,11 @@ class Generator:
         """Generate the complete SLURM script"""
         
         # Generate output directory
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        exp_name = f"{args.model.replace('-', '_')}_{timestamp}"
+        if args.exp_name is not None:
+            exp_name = args.exp_name
+        else:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            exp_name = f"{args.model.replace('-', '_')}_{timestamp}"
         output_dir = f"results/{exp_name}"
         script_path = f"{output_dir}/run.sh"
         
@@ -134,22 +137,6 @@ class Generator:
                 overrides.append('model.ttt.use_positional_encoding=true')
             elif args.no_positional_encoding is not None and args.no_positional_encoding:
                 overrides.append('model.ttt.use_positional_encoding=false')
-            if args.freeze_encoder is not None and args.freeze_encoder:
-                overrides.append('model.ttt.freeze_encoder=true')   
-            elif args.no_freeze_encoder is not None and args.no_freeze_encoder:
-                overrides.append('model.ttt.freeze_encoder=false')
-            if args.freeze_decoder is not None and args.freeze_decoder:
-                overrides.append('model.ttt.freeze_decoder=true')
-            elif args.no_freeze_decoder is not None and args.no_freeze_decoder:
-                overrides.append('model.ttt.freeze_decoder=false')
-            if args.freeze_tokenizer is not None and args.freeze_tokenizer:
-                overrides.append('model.ttt.freeze_tokenizer=true')
-            elif args.no_freeze_tokenizer is not None and args.no_freeze_tokenizer:
-                overrides.append('model.ttt.freeze_tokenizer=false')
-            if args.freeze_latent is not None and args.freeze_latent:
-                overrides.append('model.ttt.freeze_latent=true')
-            elif args.no_freeze_latent is not None and args.no_freeze_latent:
-                overrides.append('model.ttt.freeze_latent=false')
             if args.grad_mode is not None:
                 overrides.append(f'model.ttt.grad_mode={args.grad_mode}')
         
@@ -174,8 +161,25 @@ class Generator:
         elif args.no_reset_training_state is not None and args.no_reset_training_state:
             overrides.append(f'training.reset_training_state=false')
         
-        if args.wandb_exp_name is not None:
-            overrides.append(f'training.wandb_exp_name="{args.wandb_exp_name}"')
+        if args.exp_name is not None:
+            overrides.append(f'training.wandb_exp_name="{args.exp_name}"')
+
+        if args.freeze_encoder is not None and args.freeze_encoder:
+            overrides.append('training.freeze_encoder=true')   
+        elif args.no_freeze_encoder is not None and args.no_freeze_encoder:
+            overrides.append('training.freeze_encoder=false')
+        if args.freeze_decoder is not None and args.freeze_decoder:
+            overrides.append('training.freeze_decoder=true')
+        elif args.no_freeze_decoder is not None and args.no_freeze_decoder:
+            overrides.append('training.freeze_decoder=false')
+        if args.freeze_tokenizer is not None and args.freeze_tokenizer:
+            overrides.append('training.freeze_tokenizer=true')
+        elif args.no_freeze_tokenizer is not None and args.no_freeze_tokenizer:
+            overrides.append('training.freeze_tokenizer=false')
+        if args.freeze_latent is not None and args.freeze_latent:
+            overrides.append('training.freeze_latent=true')
+        elif args.no_freeze_latent is not None and args.no_freeze_latent:
+            overrides.append('training.freeze_latent=false')
         
         # Inference mode
         if args.inference is not None and args.inference:
@@ -393,8 +397,8 @@ def main():
                         help='Reset training state')
     parser.add_argument('--no-reset-training-state', action='store_true', default=None,
                         help='Do not reset training state')
-    parser.add_argument('--wandb-exp-name', type=str,
-                        help='WandB experiment name')
+    parser.add_argument('--exp-name', type=str,
+                        help='Experiment name')
     parser.add_argument('--amp-dtype', choices=['bf16', 'fp16', 'fp32'],
                         help='AMP data type')
     parser.add_argument('--grad-checkpoint', action='store_true', default=None,
