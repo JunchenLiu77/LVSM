@@ -21,6 +21,7 @@ model:
     n_latent_vectors: 3072 # 3x32x32
   ttt:
     n_layer: 3
+    n_blocks_per_layer: 1
     state_lr: 1e0
     state_lr_mode: learnable
     state_lr_init: -4.0
@@ -28,6 +29,7 @@ model:
     mlp_dim: 3072
     use_positional_encoding: true
     grad_mode: normal
+    is_residual: true
 
 training:
   # general

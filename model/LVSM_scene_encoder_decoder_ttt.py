@@ -213,6 +213,23 @@ class Images2LatentScene(nn.Module):
                     )
                 )
                 print("Initialized TTT blocks as a simple MLP and a transformer block")
+            elif self.config.model.ttt.get("opt_model", "mlp") == "transformer2":
+                # more transformer blocks, use qk norm, and put linear layers after each transformer block
+                self.ttt_blocks.append(
+                    nn.Sequential(
+                        *[QK_Norm_TransformerBlock(self.config.model.transformer.d * 2, self.config.model.transformer.d_head, use_qk_norm=True, use_positional_encoding=self.config.model.ttt.get("use_positional_encoding", True)) for _ in range(self.config.model.ttt.n_blocks_per_layer)],
+                        nn.Linear(self.config.model.transformer.d * 2, self.config.model.transformer.d, bias=False),
+                    )
+                )
+                print("Initialized TTT blocks as a more transformer blocks, use qk norm, and put linear layers after each transformer block")
+            elif self.config.model.ttt.get("opt_model", "mlp") == "transformer3":
+                # just use transformer blocks and no linear layers, the model only take in the grad_s
+                self.ttt_blocks.append(
+                    nn.Sequential(
+                        *[QK_Norm_TransformerBlock(self.config.model.transformer.d, self.config.model.transformer.d_head, use_qk_norm=True, use_positional_encoding=self.config.model.ttt.get("use_positional_encoding", True)) for _ in range(self.config.model.ttt.n_blocks_per_layer)],
+                    )
+                )
+                print("Initialized TTT blocks as a more transformer blocks, use qk norm, and no linear layers")
         
         for block in self.ttt_blocks:
             block.apply(init_weights)
@@ -383,7 +400,11 @@ class Images2LatentScene(nn.Module):
             grad_mean = torch.mean(torch.abs(grad_s)).item()
             grad_std = torch.std(grad_s).item()
             
-            opt_input = torch.cat((s, grad_s), dim=-1) # [b, n_latent_vectors, 2*d]
+            if self.config.model.ttt.get("opt_model", "mlp") == "transformer3":
+                opt_input = grad_s # [b, n_latent_vectors, d]
+            else:
+                opt_input = torch.cat((s, grad_s), dim=-1) # [b, n_latent_vectors, 2*d]
+
             delta_s = self.ttt_blocks[i](opt_input) # [b, n_latent_vectors, d]
             
             # Collect TTT block output statistics
@@ -409,12 +430,16 @@ class Images2LatentScene(nn.Module):
             # Apply update with effective learning rate
             s_update = delta_s * effective_lr
             
-            # Relative update rates
-            relative_delta = (delta_s / (s + 1e-8)).mean().item()
-            relative_update = (s_update / (s + 1e-8)).mean().item()
-            
             # Apply update
-            s = s + s_update
+            if self.config.model.ttt.get("is_residual", True):
+                s = s + s_update
+                # Relative update rates
+                relative_delta = (delta_s / (s + 1e-8)).mean().item()
+                relative_update = (s_update / (s + 1e-8)).mean().item()
+            else:
+                s = s_update
+                relative_delta = ((s_update - s) / (s + 1e-8) / (effective_lr + 1e-8)).mean().item()
+                relative_update = ((s_update - s) / (s + 1e-8)).mean().item()
             
             # Collect layer metrics
             layer_metrics = {
@@ -474,7 +499,10 @@ class Images2LatentScene(nn.Module):
         rendered_images = self.image_token_decoder(target_image_tokens)
         height, width = target.image_h_w
         patch_size = self.config.model.target_pose_tokenizer.patch_size
-        rendered_ima2333333333333w112t,
+        rendered_images = rearrange(
+            rendered_images,
+            "(b v) (h w) (p1 p2 c) -> b v c (h p1) (w p2)",
+            v=v_target,
             h=height // patch_size, 
             w=width // patch_size, 
             p1=patch_size, 

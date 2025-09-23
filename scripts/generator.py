@@ -110,10 +110,16 @@ class Generator:
                 overrides.append(f'model.transformer.encoder_n_layer={args.encoder_layers}')
             if args.decoder_layers is not None:
                 overrides.append(f'model.transformer.decoder_n_layer={args.decoder_layers}')
+            if args.n_blocks_per_layer is not None:
+                overrides.append(f'model.ttt.n_blocks_per_layer={args.n_blocks_per_layer}')
             if args.n_latent is not None:
                 overrides.append(f'model.transformer.n_latent_vectors={args.n_latent}')
             if args.ttt_layers is not None:
                 overrides.append(f'model.ttt.n_layer={args.ttt_layers}')
+            if args.is_residual is not None and args.is_residual:
+                overrides.append('model.ttt.is_residual=true')
+            elif args.no_is_residual is not None and args.no_is_residual:
+                overrides.append('model.ttt.is_residual=false')
             if args.state_lr_mode is not None:
                 overrides.append(f'model.ttt.state_lr_mode={args.state_lr_mode}')
             if args.state_lr_init is not None:
@@ -341,8 +347,14 @@ def main():
                         help='Initial value for learnable state_lr (pre-sigmoid), only used when state_lr_mode is "learnable"')
     parser.add_argument('--state-lr', type=float,
                         help='TTT state learning rate (encoder-decoder-ttt)')
-    parser.add_argument('--opt-model', choices=['mlp', 'transformer', 'flatten_mlp'],
+    parser.add_argument('--opt-model', choices=['mlp', 'transformer', 'flatten_mlp', 'transformer2', 'transformer3'],
                         help='TTT optimization model (encoder-decoder-ttt)')
+    parser.add_argument('--is-residual', action='store_true', default=None,
+                        help='Enable residual connection in TTT (encoder-decoder-ttt)')
+    parser.add_argument('--no-is-residual', action='store_true', default=None,
+                        help='Disable residual connection in TTT (encoder-decoder-ttt)')
+    parser.add_argument('--n-blocks-per-layer', type=int,
+                        help='Number of blocks per layer (encoder-decoder-ttt)')
     parser.add_argument('--mlp-dim', type=int,
                         help='TTT MLP dimension (encoder-decoder-ttt)')
     parser.add_argument('--use-positional-encoding', action='store_true', default=None,
