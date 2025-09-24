@@ -163,9 +163,9 @@ def visualize_intermediate_results(out_dir, result):
 
     input, target = result.input, result.target
 
-    if result.render is not None:
+    if result.rendered_target is not None:
         target_image = target.image
-        rendered_image = result.render
+        rendered_image = result.rendered_target
         b, v, _, h, w = rendered_image.size()
         rendered_image = rendered_image.reshape(b * v, -1, h, w)
         target_image = target_image.reshape(b * v, -1, h, w)
@@ -177,9 +177,28 @@ def visualize_intermediate_results(out_dir, result):
 
         uid_based_filename = f"{uids[0]:08}_{uids[-1]:08}"
         Image.fromarray(visualized_image).save(
-            os.path.join(out_dir, f"supervision_{uid_based_filename}.jpg")
+            os.path.join(out_dir, f"rendered_target_{uid_based_filename}.jpg")
         )
-        with open(os.path.join(out_dir, f"uids.txt"), "w") as f:
+        with open(os.path.join(out_dir, f"uids_target.txt"), "w") as f:
+            uids = "_".join([f"{uid:08}" for uid in uids])
+            f.write(uids)
+
+    if result.rendered_input is not None:
+        input_image = input.image
+        rendered_image = result.rendered_input
+        b, v, _, h, w = rendered_image.size()
+        rendered_image = rendered_image.reshape(b * v, -1, h, w)
+        input_image = input_image.reshape(b * v, -1, h, w)
+        visualized_image = torch.cat((input_image, rendered_image), dim=3).detach().cpu()
+        visualized_image = rearrange(visualized_image, "(b v) c h (m w) -> (b h) (v m w) c", v=v, m=2)
+        visualized_image = (visualized_image.numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
+        
+        uids = [input.index[b, 0, -1].item() for b in range(input.index.size(0))]
+        uid_based_filename = f"{uids[0]:08}_{uids[-1]:08}"
+        Image.fromarray(visualized_image).save(
+            os.path.join(out_dir, f"rendered_input_{uid_based_filename}.jpg")
+        )
+        with open(os.path.join(out_dir, f"uids_input.txt"), "w") as f:
             uids = "_".join([f"{uid:08}" for uid in uids])
             f.write(uids)
 

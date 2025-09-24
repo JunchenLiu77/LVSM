@@ -127,12 +127,6 @@ class ProcessData(nn.Module):
             ], dtype=torch.long, device=data_batch["image"].device)
             index = torch.sort(index, dim=1).values # [b, num_target_views]
 
-        # make sure the last two views are input views
-        index = torch.cat([index, torch.tensor([
-                [j for j in range(self.config.training.num_input_views)]
-                for _ in range(bs)
-            ], dtype=torch.long, device=data_batch["image"].device)], dim=1)
-
         for key, value in data_batch.items():
             if key == "scene_name":
                 input_dict[key] = value
