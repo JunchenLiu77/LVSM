@@ -42,6 +42,7 @@ training:
   prefetch_factor: 32
 
   # loss & grad
+  supervision: target
   grad_accum_steps: 1
   grad_checkpoint: true
   grad_checkpoint_every: 1

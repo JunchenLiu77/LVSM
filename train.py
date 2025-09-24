@@ -148,11 +148,18 @@ while cur_train_step <= total_train_steps:
         ret_dict = model(batch)
 
     update_grads = (cur_train_step + 1) % grad_accum_steps == 0 or cur_train_step == total_train_steps
+    if config.training.supervision == "target":
+        loss = ret_dict.target_loss_metrics.loss
+    elif config.training.supervision == "input":
+        loss = ret_dict.input_loss_metrics.loss
+    else:
+        raise ValueError(f"Invalid supervision type: {config.training.supervision}")
+    
     if update_grads:
         with model.no_sync(): # no sync grads for efficiency
-            scaler.scale(ret_dict.target_loss_metrics.loss / grad_accum_steps).backward()
+            scaler.scale(loss / grad_accum_steps).backward()
     else:
-        scaler.scale(ret_dict.target_loss_metrics.loss / grad_accum_steps).backward()
+        scaler.scale(loss / grad_accum_steps).backward()
     cur_train_step += 1
 
     export_inter_results = ((cur_train_step-1) == start_train_step) or (cur_train_step % config.training.vis_every == 0)
@@ -160,10 +167,13 @@ while cur_train_step <= total_train_steps:
     if update_grads:
         skip_optimizer_step = False
         # Skip optimizer step if loss is NaN or Inf
-        if torch.isnan(ret_dict.target_loss_metrics.loss) or torch.isinf(ret_dict.target_loss_metrics.loss):
+        if torch.isnan(loss) or torch.isinf(loss):
             print(f"NaN or Inf loss detected, skip this iteration")
             skip_optimizer_step = True
-            ret_dict.target_loss_metrics.loss.data = torch.zeros_like(ret_dict.target_loss_metrics.loss)
+            if config.training.supervision == "target":
+                ret_dict.target_loss_metrics.loss.data = torch.zeros_like(loss)
+            elif config.training.supervision == "input":
+                ret_dict.input_loss_metrics.loss.data = torch.zeros_like(loss)
 
         total_grad_norm = None
         # Check gradient norm and update optimizer if everything is fine

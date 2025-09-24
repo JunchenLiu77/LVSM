@@ -147,6 +147,9 @@ class Generator:
         if args.steps is not None:
             overrides.append(f'training.train_steps={args.steps}')
         
+        if args.supervision is not None:
+            overrides.append(f'training.supervision={args.supervision}')
+        
         if args.lr is not None:
             overrides.append(f'training.lr={args.lr}')
             
@@ -387,6 +390,8 @@ def main():
                         help='Batch size per GPU')
     parser.add_argument('--steps', type=int,
                         help='Number of training steps')
+    parser.add_argument('--supervision', choices=['target', 'input'],
+                        help='Supervision type')
     parser.add_argument('--lr', type=float,
                         help='Learning rate')
     parser.add_argument('--warmup', type=int,
