@@ -204,32 +204,42 @@ class Images2LatentScene(nn.Module):
                         nn.GELU(),
                         nn.Linear(self.config.model.transformer.d * 4, self.config.model.transformer.d, bias=False),
                         nn.LayerNorm(self.config.model.transformer.d, bias=False),
-                        QK_Norm_TransformerBlock(
+                        *[QK_Norm_TransformerBlock(
                             self.config.model.transformer.d,
                             self.config.model.transformer.d_head,
                             use_qk_norm=False,
                             use_positional_encoding=self.config.model.ttt.get("use_positional_encoding", True)
-                        )
+                        ) for _ in range(self.config.model.ttt.n_blocks_per_layer)],
                     )
                 )
-                print("Initialized TTT blocks as a simple MLP and a transformer block")
+                print(f"Initialized TTT blocks as a simple MLP and {self.config.model.ttt.n_blocks_per_layer} transformer blocks")
             elif self.config.model.ttt.get("opt_model", "mlp") == "transformer2":
                 # more transformer blocks, use qk norm, and put linear layers after each transformer block
                 self.ttt_blocks.append(
                     nn.Sequential(
-                        *[QK_Norm_TransformerBlock(self.config.model.transformer.d * 2, self.config.model.transformer.d_head, use_qk_norm=True, use_positional_encoding=self.config.model.ttt.get("use_positional_encoding", True)) for _ in range(self.config.model.ttt.n_blocks_per_layer)],
+                        *[QK_Norm_TransformerBlock(
+                            self.config.model.transformer.d * 2, 
+                            self.config.model.transformer.d_head, 
+                            use_qk_norm=True, 
+                            use_positional_encoding=self.config.model.ttt.get("use_positional_encoding", True)
+                        ) for _ in range(self.config.model.ttt.n_blocks_per_layer)],
                         nn.Linear(self.config.model.transformer.d * 2, self.config.model.transformer.d, bias=False),
                     )
                 )
-                print("Initialized TTT blocks as a more transformer blocks, use qk norm, and put linear layers after each transformer block")
+                print(f"Initialized TTT blocks as {self.config.model.ttt.n_blocks_per_layer} transformer blocks and put linear layers after each transformer block")
             elif self.config.model.ttt.get("opt_model", "mlp") == "transformer3":
                 # just use transformer blocks and no linear layers, the model only take in the grad_s
                 self.ttt_blocks.append(
                     nn.Sequential(
-                        *[QK_Norm_TransformerBlock(self.config.model.transformer.d, self.config.model.transformer.d_head, use_qk_norm=True, use_positional_encoding=self.config.model.ttt.get("use_positional_encoding", True)) for _ in range(self.config.model.ttt.n_blocks_per_layer)],
+                        *[QK_Norm_TransformerBlock(
+                            self.config.model.transformer.d, 
+                            self.config.model.transformer.d_head, 
+                            use_qk_norm=True, 
+                            use_positional_encoding=self.config.model.ttt.get("use_positional_encoding", True)
+                        ) for _ in range(self.config.model.ttt.n_blocks_per_layer)],
                     )
                 )
-                print("Initialized TTT blocks as a more transformer blocks, use qk norm, and no linear layers")
+                print(f"Initialized TTT blocks as {self.config.model.ttt.n_blocks_per_layer} transformer blocks and no linear layers")
         
         for block in self.ttt_blocks:
             block.apply(init_weights)
