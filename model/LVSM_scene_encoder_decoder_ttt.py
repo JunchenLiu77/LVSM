@@ -387,15 +387,27 @@ class Images2LatentScene(nn.Module):
             'layers': []
         }
         input_pose_tokens = None
+
+        if self.config.model.ttt.get("detach_s0", False):
+            # If detach s0, the gradient will not flow into encoder, tokenizer and the register_token.
+            # We need to detach s but then make it require grad again for autograd.grad to work
+            s = s.detach().requires_grad_(True)
         
         for i in range(self.config.model.ttt.n_layer):
+            if self.config.model.ttt.get("detach_decoder_input", False):
+                # If detach decoder input, the gradient will not flow into the decoder input.
+                decoder_input = s.detach().requires_grad_(True)
+            else:
+                decoder_input = s
+            
             # render input views and compute input loss
-            rendered_input, input_pose_tokens = self.decode(input, s, target_pose_tokens=input_pose_tokens)
+            rendered_input, input_pose_tokens = self.decode(input, decoder_input, target_pose_tokens=input_pose_tokens)
+
             input_loss_metrics = self.loss_computer(rendered_input, input.image)
             input_loss = input_loss_metrics["loss"]
             
             if self.config.model.ttt["grad_mode"] == "normal":
-                grad_s = torch.autograd.grad(input_loss, s, create_graph=False, retain_graph=False)[0]
+                grad_s = torch.autograd.grad(input_loss, decoder_input, create_graph=False, retain_graph=False)[0]
                 grad_s = (grad_s - grad_s.mean(dim=(-2, -1), keepdim=True)) / (grad_s.std(dim=(-2, -1), keepdim=True) + 1e-6) # [b, n_latent_vectors, d]
             elif self.config.model.ttt["grad_mode"] == "zero":
                 grad_s = torch.zeros_like(s)
@@ -406,11 +418,20 @@ class Images2LatentScene(nn.Module):
             grad_max = torch.max(torch.abs(grad_s)).item()
             grad_mean = torch.mean(torch.abs(grad_s)).item()
             grad_std = torch.std(grad_s).item()
+
+            if self.config.model.ttt.get("detach_grad", False):
+                # If detach grad, the gradient will not flow into the decoder 
+                grad_s = grad_s.detach()
             
             if self.config.model.ttt.get("opt_model", "mlp") == "transformer3":
                 opt_input = grad_s # [b, n_latent_vectors, d]
             else:
-                opt_input = torch.cat((s, grad_s), dim=-1) # [b, n_latent_vectors, 2*d]
+                if self.config.model.ttt.get("detach_opt_input", False):
+                    # If detach opt input, the gradient will not flow into the opt input state.
+                    opt_input_s = s.detach()
+                else:
+                    opt_input_s = s
+                opt_input = torch.cat((opt_input_s, grad_s), dim=-1) # [b, n_latent_vectors, 2*d]
 
             delta_s = self.ttt_blocks[i](opt_input) # [b, n_latent_vectors, d]
             

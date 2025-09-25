@@ -30,6 +30,10 @@ model:
     use_positional_encoding: true
     grad_mode: normal
     is_residual: true
+    detach_s0: false
+    detach_grad: false
+    detach_decoder_input: false
+    detach_opt_input: false
 
 training:
   # general
