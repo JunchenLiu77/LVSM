@@ -11,6 +11,17 @@ from torch.utils.data import DataLoader, DistributedSampler
 import torch.distributed as dist
 from setup import init_config, init_distributed, init_wandb_and_backup
 from utils.metric_utils import visualize_intermediate_results
+
+# Mute noisy warnings/logs from torch.compile/inductor
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning, module='torch')
+try:
+    import torch._logging as torch_logging
+    # Reduce log verbosity to only errors
+    torch_logging.set_logs(dynamo='error', inductor='error', aot='error', fx='error')
+except Exception:
+    pass
+
 from utils.training_utils import create_optimizer, create_lr_scheduler, auto_resume_job, print_rank0
 
 
@@ -126,7 +137,17 @@ if config.training.get("use_torch_compile", False):
     torch._dynamo.config.capture_scalar_outputs = True
     torch._dynamo.config.suppress_errors = True  # Fallback to eager mode if compilation fails
 if config.training.get("use_torch_compile", False):
+    # Disable compilation for ttt_update due to complex control flow
+    import torch._dynamo
+    try:
+        target = model.module if hasattr(model, 'module') else model
+        if hasattr(target, 'ttt_update'):
+            torch._dynamo.disable(target.ttt_update)
+            print_rank0("Disabled compilation for ttt_update function (complex control flow)")
+    except Exception as e:
+        print_rank0(f"Warning: could not disable compilation for ttt_update: {e}")
     model = torch.compile(model)
+    print_rank0("Model compilation completed.")
 
 enable_grad_scaler = config.training.use_amp and config.training.amp_dtype == "fp16"
 scaler = torch.amp.GradScaler('cuda', enabled=enable_grad_scaler)

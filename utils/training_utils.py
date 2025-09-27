@@ -13,6 +13,34 @@ import traceback
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 
+def fix_checkpoint_state_dict_compatibility(model, checkpoint_state_dict):
+    """Fix compatibility between compiled and non-compiled model state dicts."""
+    # Get model state dict keys to determine structure
+    if hasattr(model, 'module'):  # DDP wrapped model
+        model_keys = set(model.module.state_dict().keys())
+    else:
+        model_keys = set(model.state_dict().keys())
+    checkpoint_keys = set(checkpoint_state_dict.keys())
+    # Check if model is compiled (has _orig_mod prefix)
+    model_compiled = any(k.startswith('_orig_mod.') for k in model_keys)
+    checkpoint_compiled = any(k.startswith('_orig_mod.') for k in checkpoint_keys)
+    # If both have same compilation status, return as-is
+    if model_compiled == checkpoint_compiled:
+        return checkpoint_state_dict
+    # Case 1: Model is compiled, checkpoint is not compiled
+    if model_compiled and not checkpoint_compiled:
+        print('Converting non-compiled checkpoint for compiled model (adding _orig_mod prefixes)')
+        return {f'_orig_mod.{k}': v for k, v in checkpoint_state_dict.items()}
+    # Case 2: Model is not compiled, checkpoint is compiled
+    if (not model_compiled) and checkpoint_compiled:
+        print('Converting compiled checkpoint for non-compiled model (removing _orig_mod prefixes)')
+        fixed = {}
+        for k, v in checkpoint_state_dict.items():
+            fixed[k[len('_orig_mod.'):]] = v if k.startswith('_orig_mod.') else v
+        return fixed
+    return checkpoint_state_dict
+
+
 def print_rank0(*args, **kwargs):
     if dist.is_initialized():
         if dist.get_rank() == 0:
@@ -151,11 +179,13 @@ def auto_resume_job(
         print_rank0(f"Failed to load {ckpt_path}, we will start from scratch")
         return optimizer, lr_scheduler, forward_pass_step, param_update_step
 
-    # Load model weights
+    # Load model weights with compilation compatibility fix
+    fixed_state_dict = fix_checkpoint_state_dict_compatibility(model, checkpoint['model'])
+    
     if isinstance(model, DDP):
-        status = model.module.load_state_dict(checkpoint['model'], strict=False)
+        status = model.module.load_state_dict(fixed_state_dict, strict=False)
     else:
-        status = model.load_state_dict(checkpoint['model'], strict=False)
+        status = model.load_state_dict(fixed_state_dict, strict=False)
     print_rank0(f"Loaded model from {os.path.abspath(ckpt_path)}, the status is {status}")
 
     # resume training state

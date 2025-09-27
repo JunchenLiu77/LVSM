@@ -215,6 +215,12 @@ class Generator:
         elif args.no_grad_checkpoint is not None and args.no_grad_checkpoint:
             overrides.append(f'training.grad_checkpoint=false')
         
+        # Torch compile settings
+        if args.torch_compile is not None and args.torch_compile:
+            overrides.append(f'training.use_torch_compile=true')
+        elif args.no_torch_compile is not None and args.no_torch_compile:
+            overrides.append(f'training.use_torch_compile=false')
+        
         return overrides
     
     def _generate_slurm_script(self, args, config_file, overrides, output_dir):
@@ -450,6 +456,10 @@ def main():
                         help='Freeze latent parameters (encoder-decoder-ttt)')
     parser.add_argument('--no-freeze-latent', action='store_true', default=None,
                         help='Do not freeze latent parameters (encoder-decoder-ttt)')
+    parser.add_argument('--torch-compile', action='store_true', default=None,
+                        help='Enable torch.compile for model optimization')
+    parser.add_argument('--no-torch-compile', action='store_true', default=None,
+                        help='Disable torch.compile')
     
     # Inference mode
     parser.add_argument('--inference', action='store_true', default=None,

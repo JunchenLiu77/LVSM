@@ -46,6 +46,9 @@ training:
   num_threads: 8
   batch_size_per_gpu: 8
   train_steps: 100000
+  
+  # torch.compile settings
+  use_torch_compile: false
 
   # dataset
   dataset_name: data.dataset_scene.Dataset
