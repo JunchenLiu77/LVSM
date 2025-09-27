@@ -114,6 +114,20 @@ if config.training.get("resume_ckpt", "") != "":
         reset_training_state,
     )
 
+# Apply torch.compile if enabled
+
+# Configure torch.compile with DDP compatibility
+if config.training.get("use_torch_compile", False):
+    import torch._dynamo
+    # Disable DDP optimizer to prevent higher-order op conflicts
+    torch._dynamo.config.optimize_ddp = False
+
+    # Additional torch compile configurations for better compatibility
+    torch._dynamo.config.capture_scalar_outputs = True
+    torch._dynamo.config.suppress_errors = True  # Fallback to eager mode if compilation fails
+if config.training.get("use_torch_compile", False):
+    model = torch.compile(model)
+
 enable_grad_scaler = config.training.use_amp and config.training.amp_dtype == "fp16"
 scaler = torch.amp.GradScaler('cuda', enabled=enable_grad_scaler)
 print_rank0(f"Grad scaler enabled: {enable_grad_scaler}")
