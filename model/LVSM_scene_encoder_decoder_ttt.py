@@ -35,8 +35,8 @@ class Images2LatentScene(nn.Module):
         
         # Count TTT parameters for logging
         self.ttt_param_counts = {
-            'total_ttt_params': sum(p.numel() for block in self.ttt_blocks for p in block.parameters()),
-            'trainable_ttt_params': sum(p.numel() for block in self.ttt_blocks for p in block.parameters() if p.requires_grad),
+            'total_ttt_params': sum(p.numel() for block in self.ttt_blocks for p in block.parameters()) if self.ttt_blocks is not None else 0,
+            'trainable_ttt_params': sum(p.numel() for block in self.ttt_blocks for p in block.parameters() if p.requires_grad) if self.ttt_blocks is not None else 0,
             'blocks': []
         }
         
@@ -46,7 +46,7 @@ class Images2LatentScene(nn.Module):
                 self.ttt_param_counts['total_ttt_params'] += lr_param.numel()
                 self.ttt_param_counts['trainable_ttt_params'] += lr_param.numel() if lr_param.requires_grad else 0
         
-        for i, block in enumerate(self.ttt_blocks):
+        for i, block in enumerate(self.ttt_blocks) if self.ttt_blocks is not None else []:
             block_params = sum(p.numel() for p in block.parameters())
             block_trainable = sum(p.numel() for p in block.parameters() if p.requires_grad)
             self.ttt_param_counts['blocks'].append({
@@ -160,6 +160,32 @@ class Images2LatentScene(nn.Module):
         self.transformer_input_layernorm_decoder = nn.LayerNorm(config.d, bias=False)
 
     def _init_ttt(self):
+        # Initialize state learning rate based on configuration
+        state_lr_mode = self.config.model.ttt.get('state_lr_mode', 'fixed')
+        
+        if state_lr_mode == 'learnable':
+            # Initialize learnable state_lr parameters for each TTT layer
+            self.ttt_learnable_state_lr = nn.ParameterList()
+            init_value = self.config.model.ttt.get('state_lr_init', -4.0)
+            
+            for _ in range(self.config.model.ttt.n_layer):
+                # Create a learnable gating vector with shape [D]
+                lr_param = nn.Parameter(torch.full((self.config.model.transformer.d,), init_value))
+                self.ttt_learnable_state_lr.append(lr_param)
+            
+            print(f"Initialized learnable state_lr with init_value={init_value}")
+        else:
+            # Use fixed state_lr from config
+            self.ttt_learnable_state_lr = None
+            print(f"Using fixed state_lr={self.config.model.ttt.state_lr}")
+        
+        if self.config.model.ttt.get("opt_model", "mlp") == "adam":
+            # Adam option does not instantiate learnable optimizer blocks.
+            # Updates are computed using torch.optim.Adam during ttt_update.
+            self.ttt_blocks = None
+            print("Use Adam optimizers for TTT blocks, which will be created during ttt_update")
+            return
+        
         self.ttt_blocks = nn.ModuleList()
         for _ in range(self.config.model.ttt.n_layer):
             if self.config.model.ttt.get("opt_model", "mlp") == "mlp":
@@ -243,31 +269,12 @@ class Images2LatentScene(nn.Module):
         
         for block in self.ttt_blocks:
             block.apply(init_weights)
-        
-        # Initialize state learning rate based on configuration
-        state_lr_mode = self.config.model.ttt.get('state_lr_mode', 'fixed')
-        
-        if state_lr_mode == 'learnable':
-            # Initialize learnable state_lr parameters for each TTT layer
-            self.ttt_learnable_state_lr = nn.ParameterList()
-            init_value = self.config.model.ttt.get('state_lr_init', -4.0)
-            
-            for _ in range(self.config.model.ttt.n_layer):
-                # Create a learnable gating vector with shape [D]
-                lr_param = nn.Parameter(torch.full((self.config.model.transformer.d,), init_value))
-                self.ttt_learnable_state_lr.append(lr_param)
-            
-            print(f"Initialized learnable state_lr with init_value={init_value}")
-        else:
-            # Use fixed state_lr from config
-            self.ttt_learnable_state_lr = None
-            print(f"Using fixed state_lr={self.config.model.ttt.state_lr}")
+
 
     def train(self, mode=True):
         """Override the train method to keep the loss computer in eval mode"""
         super().train(mode)
         self.loss_computer.eval()
-
 
     
     def pass_layers(self, transformer_blocks, input_tokens, gradient_checkpoint=False, checkpoint_every=1):
@@ -405,6 +412,8 @@ class Images2LatentScene(nn.Module):
 
             input_loss_metrics = self.loss_computer(rendered_input, input.image)
             input_loss = input_loss_metrics["loss"]
+
+            layer_metrics = {'input_loss': input_loss.item()}
             
             if self.config.model.ttt["grad_mode"] == "normal":
                 grad_s = torch.autograd.grad(input_loss, decoder_input, create_graph=False, retain_graph=False)[0]
@@ -415,30 +424,55 @@ class Images2LatentScene(nn.Module):
                 grad_s = torch.randn_like(s)
 
             # Collect gradient statistics
-            grad_max = torch.max(torch.abs(grad_s)).item()
-            grad_mean = torch.mean(torch.abs(grad_s)).item()
-            grad_std = torch.std(grad_s).item()
+            layer_metrics["grad_max"] = torch.max(torch.abs(grad_s)).item()
+            layer_metrics["grad_mean"] = torch.mean(torch.abs(grad_s)).item()
+            layer_metrics["grad_std"] = torch.std(grad_s).item()
 
             if self.config.model.ttt.get("detach_grad", False):
                 # If detach grad, the gradient will not flow into the decoder 
                 grad_s = grad_s.detach()
             
-            if self.config.model.ttt.get("opt_model", "mlp") == "transformer3":
-                opt_input = grad_s # [b, n_latent_vectors, d]
+            if self.config.model.ttt.get("opt_model", "mlp") == "adam":
+                # Create Adam optimizer with the current state as parameter
+                state_param = nn.Parameter(s.clone().detach().requires_grad_(True))
+                state_param.grad = grad_s
+                
+                # Get Adam hyperparameters
+                adam_lr = self.config.model.ttt.adam.get("lr", 1e-3)
+                adam_beta1 = self.config.model.ttt.adam.get("beta1", 0.9)
+                adam_beta2 = self.config.model.ttt.adam.get("beta2", 0.999)
+                adam_eps = self.config.model.ttt.adam.get("eps", 1e-8)
+                adam_weight_decay = self.config.model.ttt.adam.get("weight_decay", 0.0)
+                
+                # Create Adam optimizer
+                optimizer = torch.optim.Adam(
+                    [state_param], 
+                    lr=adam_lr, 
+                    betas=(adam_beta1, adam_beta2), 
+                    eps=adam_eps, 
+                    weight_decay=adam_weight_decay
+                )
+                
+                # update the state
+                optimizer.step()
+                delta_s = state_param.data - s
             else:
-                if self.config.model.ttt.get("detach_opt_input", False):
-                    # If detach opt input, the gradient will not flow into the opt input state.
-                    opt_input_s = s.detach()
+                if self.config.model.ttt.get("opt_model", "mlp") == "transformer3":
+                    opt_input = grad_s # [b, n_latent_vectors, d]
                 else:
-                    opt_input_s = s
-                opt_input = torch.cat((opt_input_s, grad_s), dim=-1) # [b, n_latent_vectors, 2*d]
+                    if self.config.model.ttt.get("detach_opt_input", False):
+                        # If detach opt input, the gradient will not flow into the opt input state.
+                        opt_input_s = s.detach()
+                    else:
+                        opt_input_s = s
+                    opt_input = torch.cat((opt_input_s, grad_s), dim=-1) # [b, n_latent_vectors, 2*d]
 
-            delta_s = self.ttt_blocks[i](opt_input) # [b, n_latent_vectors, d]
+                delta_s = self.ttt_blocks[i](opt_input) # [b, n_latent_vectors, d]
             
             # Collect TTT block output statistics
-            delta_s_max = torch.max(torch.abs(delta_s)).item()
-            delta_s_mean = torch.mean(torch.abs(delta_s)).item()
-            delta_s_std = torch.std(delta_s).item()
+            layer_metrics["delta_s_max"] = torch.max(torch.abs(delta_s)).item()
+            layer_metrics["delta_s_mean"] = torch.mean(torch.abs(delta_s)).item()
+            layer_metrics["delta_s_std"] = torch.std(delta_s).item()
             
             # Get the effective state_lr for this layer
             if self.ttt_learnable_state_lr is not None:
@@ -454,6 +488,8 @@ class Images2LatentScene(nn.Module):
                 # Use fixed state_lr from config
                 state_lr_value = self.config.model.ttt.state_lr
                 effective_lr = state_lr_value
+
+            layer_metrics["state_lr"] = state_lr_value
             
             # Apply update with effective learning rate
             s_update = delta_s * effective_lr
@@ -462,26 +498,12 @@ class Images2LatentScene(nn.Module):
             if self.config.model.ttt.get("is_residual", True):
                 s = s + s_update
                 # Relative update rates
-                relative_delta = (delta_s / (s + 1e-8)).mean().item()
-                relative_update = (s_update / (s + 1e-8)).mean().item()
-            else:
+                layer_metrics["relative_delta"] = (delta_s / (s + 1e-8)).mean().item()
+                layer_metrics["relative_update"] = (s_update / (s + 1e-8)).mean().item()
+            else:   
                 s = s_update
-                relative_delta = ((s_update - s) / (s + 1e-8) / (effective_lr + 1e-8)).mean().item()
-                relative_update = ((s_update - s) / (s + 1e-8)).mean().item()
-            
-            # Collect layer metrics
-            layer_metrics = {
-                'input_loss': input_loss.item(),
-                'grad_max': grad_max,
-                'grad_mean': grad_mean,
-                'grad_std': grad_std,
-                'delta_s_max': delta_s_max,
-                'delta_s_mean': delta_s_mean,
-                'delta_s_std': delta_s_std,
-                'state_lr': state_lr_value,
-                'relative_delta': relative_delta,
-                'relative_update': relative_update,
-            }
+                layer_metrics["relative_delta"] = ((s_update - s) / (s + 1e-8) / (effective_lr + 1e-8)).mean().item()
+                layer_metrics["relative_update"] = ((s_update - s) / (s + 1e-8)).mean().item()
             
             # Add learnable lr statistics if applicable
             if self.ttt_learnable_state_lr is not None:

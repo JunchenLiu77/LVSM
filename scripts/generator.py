@@ -366,7 +366,7 @@ def main():
                         help='Initial value for learnable state_lr (pre-sigmoid), only used when state_lr_mode is "learnable"')
     parser.add_argument('--state-lr', type=float,
                         help='TTT state learning rate (encoder-decoder-ttt)')
-    parser.add_argument('--opt-model', choices=['mlp', 'transformer', 'flatten_mlp', 'transformer2', 'transformer3'],
+    parser.add_argument('--opt-model', choices=['mlp', 'transformer', 'flatten_mlp', 'transformer2', 'transformer3', 'adam'],
                         help='TTT optimization model (encoder-decoder-ttt)')
     parser.add_argument('--is-residual', action='store_true', default=None,
                         help='Enable residual connection in TTT (encoder-decoder-ttt)')
@@ -398,6 +398,16 @@ def main():
                         help='Detach opt input in TTT (encoder-decoder-ttt)')
     parser.add_argument('--no-detach-opt-input', action='store_true', default=None,
                         help='Do not detach opt input in TTT (encoder-decoder-ttt)')
+    parser.add_argument('--ttt-adam-lr', type=float,
+                        help='Adam learning rate (encoder-decoder-ttt)')
+    parser.add_argument('--ttt-adam-beta1', type=float,
+                        help='Adam beta1 (encoder-decoder-ttt)')
+    parser.add_argument('--ttt-adam-beta2', type=float,
+                        help='Adam beta2 (encoder-decoder-ttt)')
+    parser.add_argument('--ttt-adam-eps', type=float,
+                        help='Adam eps (encoder-decoder-ttt)')
+    parser.add_argument('--ttt-adam-weight-decay', type=float,
+                        help='Adam weight decay (encoder-decoder-ttt)')
 
     # Training configuration
     parser.add_argument('--batch-size', type=int,

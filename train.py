@@ -276,23 +276,24 @@ while cur_train_step <= total_train_steps:
             if hasattr(model.module if hasattr(model, 'module') else model, 'ttt_blocks'):
                 ttt_blocks = (model.module if hasattr(model, 'module') else model).ttt_blocks
                 total_ttt_grad_norm = 0.0
-                for i, block in enumerate(ttt_blocks):
-                    block_grad_norm = 0.0
-                    max_grad = 0.0
-                    for name, param in block.named_parameters():
-                        if param.grad is not None:
-                            grad_norm = torch.norm(param.grad).item()
-                            block_grad_norm += grad_norm * grad_norm
-                            max_grad = max(max_grad, torch.max(torch.abs(param.grad)).item())
-                    
-                    if block_grad_norm > 0:
-                        block_grad_norm = block_grad_norm ** 0.5
-                        log_dict[f'ttt/grad/block_{i}_norm'] = block_grad_norm
-                        log_dict[f'ttt/grad/block_{i}_max'] = max_grad
-                        total_ttt_grad_norm += block_grad_norm * block_grad_norm
-                    else:
-                        log_dict[f'ttt/grad/block_{i}_norm'] = 0.0
-                        log_dict[f'ttt/grad/block_{i}_max'] = 0.0
+                if ttt_blocks is not None:
+                    for i, block in enumerate(ttt_blocks):
+                        block_grad_norm = 0.0
+                        max_grad = 0.0
+                        for name, param in block.named_parameters():
+                            if param.grad is not None:
+                                grad_norm = torch.norm(param.grad).item()
+                                block_grad_norm += grad_norm * grad_norm
+                                max_grad = max(max_grad, torch.max(torch.abs(param.grad)).item())
+                        
+                        if block_grad_norm > 0:
+                            block_grad_norm = block_grad_norm ** 0.5
+                            log_dict[f'ttt/grad/block_{i}_norm'] = block_grad_norm
+                            log_dict[f'ttt/grad/block_{i}_max'] = max_grad
+                            total_ttt_grad_norm += block_grad_norm * block_grad_norm
+                        else:
+                            log_dict[f'ttt/grad/block_{i}_norm'] = 0.0
+                            log_dict[f'ttt/grad/block_{i}_max'] = 0.0
                 
                 if total_ttt_grad_norm > 0:
                     log_dict['ttt/grad/total_norm'] = (total_ttt_grad_norm ** 0.5)
