@@ -154,6 +154,8 @@ class Generator:
                 overrides.append('model.ttt.detach_opt_input=true')
             elif args.no_detach_opt_input is not None and args.no_detach_opt_input:
                 overrides.append('model.ttt.detach_opt_input=false')
+            if args.supervise_mode is not None:
+                overrides.append(f'model.ttt.supervise_mode={args.supervise_mode}')
         
         # Training configuration overrides
         if args.batch_size is not None:
@@ -414,7 +416,9 @@ def main():
                         help='Adam eps (encoder-decoder-ttt)')
     parser.add_argument('--ttt-adam-weight-decay', type=float,
                         help='Adam weight decay (encoder-decoder-ttt)')
-
+    parser.add_argument('--supervise-mode', choices=['last', 'average'],
+                        help='Supervise mode (encoder-decoder-ttt)')
+    
     # Training configuration
     parser.add_argument('--batch-size', type=int,
                         help='Batch size per GPU')

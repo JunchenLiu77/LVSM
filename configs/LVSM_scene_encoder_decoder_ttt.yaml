@@ -34,6 +34,7 @@ model:
     detach_grad: false
     detach_decoder_input: false
     detach_opt_input: false
+    supervise_mode: last
     adam:
       lr: 1e-2
       beta1: 0.9

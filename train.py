@@ -183,12 +183,7 @@ while cur_train_step <= total_train_steps:
         ret_dict = model(batch)
 
     update_grads = (cur_train_step + 1) % grad_accum_steps == 0 or cur_train_step == total_train_steps
-    if config.training.supervision == "target":
-        loss = ret_dict.target_loss_metrics.loss
-    elif config.training.supervision == "input":
-        loss = ret_dict.input_loss_metrics.loss
-    else:
-        raise ValueError(f"Invalid supervision type: {config.training.supervision}")
+    loss = ret_dict.loss
     
     if update_grads:
         with model.no_sync(): # no sync grads for efficiency
