@@ -104,7 +104,7 @@ class Images2LatentScene(nn.Module):
     def _init_transformer(self):
         """Initialize transformer blocks"""
         config = self.config.model.transformer
-        use_qk_norm = config.get("use_qk_norm", False)
+        use_qk_norm = config.use_qk_norm
 
         # latent vectors for LVSM encoder-decoder
         self.n_light_field_latent = nn.Parameter(
@@ -129,10 +129,10 @@ class Images2LatentScene(nn.Module):
         ]
         
         # Apply special initialization if configured
-        if config.get("special_init", False):
+        if config.special_init:
             # Encoder
             for idx, block in enumerate(self.transformer_encoder):
-                if config.get("depth_init", False):
+                if config.depth_init:
                     weight_init_std = 0.02 / (2 * (idx + 1)) ** 0.5
                 else:
                     weight_init_std = 0.02 / (2 * config.encoder_n_layer) ** 0.5
@@ -140,7 +140,7 @@ class Images2LatentScene(nn.Module):
 
             # Decoder
             for idx, block in enumerate(self.transformer_decoder):
-                if config.get("depth_init", False):
+                if config.depth_init:
                     weight_init_std = 0.02 / (2 * (idx + 1)) ** 0.5
                 else:
                     weight_init_std = 0.02 / (2 * config.decoder_n_layer) ** 0.5
@@ -161,12 +161,12 @@ class Images2LatentScene(nn.Module):
 
     def _init_ttt(self):
         # Initialize state learning rate based on configuration
-        state_lr_mode = self.config.model.ttt.get('state_lr_mode', 'fixed')
+        state_lr_mode = self.config.model.ttt.state_lr_mode
         
         if state_lr_mode == 'learnable':
             # Initialize learnable state_lr parameters for each TTT layer
             self.ttt_learnable_state_lr = nn.ParameterList()
-            init_value = self.config.model.ttt.get('state_lr_init', -4.0)
+            init_value = self.config.model.ttt.state_lr_init
             
             for _ in range(self.config.model.ttt.n_layer):
                 # Create a learnable gating vector with shape [D]
@@ -180,10 +180,13 @@ class Images2LatentScene(nn.Module):
             print(f"Using fixed state_lr={self.config.model.ttt.state_lr}")
         
         # Initialize LayerNorm modules for gradient and state normalization
-        self.grad_normalizer = nn.LayerNorm(self.config.model.transformer.d, bias=False)
-        self.state_normalizer = nn.LayerNorm(self.config.model.transformer.d, bias=False)
+        # self.state_normalizer = nn.LayerNorm(self.config.model.transformer.d, bias=False)
+
+        self.ttt_grad_normalizers = nn.ModuleList()
+        for _ in range(self.config.model.ttt.n_layer):
+            self.ttt_grad_normalizers.append(nn.LayerNorm(self.config.model.transformer.d, bias=False))
         
-        if self.config.model.ttt.get("opt_model", "mlp") == "adam":
+        if self.config.model.ttt.opt_model == "adam":
             # Adam option does not instantiate learnable optimizer blocks.
             # Updates are computed using torch.optim.Adam during ttt_update.
             self.ttt_blocks = None
@@ -192,7 +195,7 @@ class Images2LatentScene(nn.Module):
         
         self.ttt_blocks = nn.ModuleList()
         for _ in range(self.config.model.ttt.n_layer):
-            if self.config.model.ttt.get("opt_model", "mlp") == "mlp":
+            if self.config.model.ttt.opt_model == "mlp":
                 # Instantiate TTT blocks as a simple MLP
                 self.ttt_blocks.append(
                     nn.Sequential(
@@ -202,7 +205,7 @@ class Images2LatentScene(nn.Module):
                     )
                 )
                 print("Initialized TTT blocks as a simple MLP")
-            elif self.config.model.ttt.get("opt_model", "mlp") == "flatten_mlp":
+            elif self.config.model.ttt.opt_model == "flatten_mlp":
                 # Instantiate TTT blocks as a simple MLP, but flatten the input to perform global fusion.
                 self.ttt_blocks.append(
                     nn.Sequential(
@@ -224,7 +227,7 @@ class Images2LatentScene(nn.Module):
                     )
                 )
                 print("Initialized TTT blocks as a simple MLP, but flatten the input to perform global fusion")
-            elif self.config.model.ttt.get("opt_model", "mlp") == "transformer":
+            elif self.config.model.ttt.opt_model == "transformer":
                 # Instantiate TTT blocks as a simple MLP and a transformer block.
                 # TTT block take in concatenated state tokens and their gradients [b, n_latent_vectors, 2*d]
                 # and output the updated state tokens [b, n_latent_vectors, d]
@@ -237,13 +240,13 @@ class Images2LatentScene(nn.Module):
                         *[QK_Norm_TransformerBlock(
                             self.config.model.transformer.d,
                             self.config.model.transformer.d_head,
-                            use_qk_norm=False,
-                            use_positional_encoding=self.config.model.ttt.get("use_positional_encoding", True)
+                            use_qk_norm=True,
+                            use_positional_encoding=self.config.model.ttt.use_positional_encoding
                         ) for _ in range(self.config.model.ttt.n_blocks_per_layer)],
                     )
                 )
                 print(f"Initialized TTT blocks as a simple MLP and {self.config.model.ttt.n_blocks_per_layer} transformer blocks")
-            elif self.config.model.ttt.get("opt_model", "mlp") == "transformer2":
+            elif self.config.model.ttt.opt_model == "transformer2":
                 # more transformer blocks, use qk norm, and put linear layers after each transformer block
                 self.ttt_blocks.append(
                     nn.Sequential(
@@ -251,13 +254,13 @@ class Images2LatentScene(nn.Module):
                             self.config.model.transformer.d * 2, 
                             self.config.model.transformer.d_head, 
                             use_qk_norm=True, 
-                            use_positional_encoding=self.config.model.ttt.get("use_positional_encoding", True)
+                            use_positional_encoding=self.config.model.ttt.use_positional_encoding
                         ) for _ in range(self.config.model.ttt.n_blocks_per_layer)],
                         nn.Linear(self.config.model.transformer.d * 2, self.config.model.transformer.d, bias=False),
                     )
                 )
                 print(f"Initialized TTT blocks as {self.config.model.ttt.n_blocks_per_layer} transformer blocks and put linear layers after each transformer block")
-            elif self.config.model.ttt.get("opt_model", "mlp") == "transformer3":
+            elif self.config.model.ttt.opt_model == "transformer3":
                 # just use transformer blocks and no linear layers, the model only take in the grad_s
                 self.ttt_blocks.append(
                     nn.Sequential(
@@ -265,7 +268,7 @@ class Images2LatentScene(nn.Module):
                             self.config.model.transformer.d, 
                             self.config.model.transformer.d_head, 
                             use_qk_norm=True, 
-                            use_positional_encoding=self.config.model.ttt.get("use_positional_encoding", True)
+                            use_positional_encoding=self.config.model.ttt.use_positional_encoding
                         ) for _ in range(self.config.model.ttt.n_blocks_per_layer)],
                     )
                 )
@@ -401,7 +404,7 @@ class Images2LatentScene(nn.Module):
         input_pose_tokens = None
         target_pose_tokens = None
 
-        if self.config.model.ttt.get("detach_s0", False):
+        if self.config.model.ttt.detach_s0:
             # If detach s0, the gradient will not flow into encoder, tokenizer and the register_token.
             # We need to detach s but then make it require grad again for autograd.grad to work
             s = s.detach().requires_grad_(True)
@@ -409,7 +412,7 @@ class Images2LatentScene(nn.Module):
         # s = self.state_normalizer(s)
         
         for i in range(self.config.model.ttt.n_layer):
-            if self.config.model.ttt.get("detach_decoder_input", False):
+            if self.config.model.ttt.detach_decoder_input:
                 # If detach decoder input, the gradient will not flow into the decoder input.
                 decoder_input = s.detach().requires_grad_(True)
             else:
@@ -424,19 +427,20 @@ class Images2LatentScene(nn.Module):
             layer_metrics["input_loss"] = input_loss.item()
 
             # render target views and compute target loss
-            if self.config.model.ttt["supervise_mode"] == "average":
+            if self.config.model.ttt.supervise_mode == "average":
                 rendered_target, target_pose_tokens = self.decode(target, decoder_input, target_pose_tokens=target_pose_tokens)
                 target_loss_metrics = self.loss_computer(rendered_target, target.image)
                 target_loss = target_loss_metrics["loss"]
                 layer_metrics["target_loss"] = target_loss.item()
             
-            if self.config.model.ttt["grad_mode"] == "normal":
+            if self.config.model.ttt.grad_mode == "normal":
                 grad_s = torch.autograd.grad(input_loss, decoder_input, create_graph=False, retain_graph=False)[0]
-                grad_s = (grad_s - grad_s.mean(dim=(-2, -1), keepdim=True)) / (grad_s.std(dim=(-2, -1), keepdim=True) + 1e-6) # [b, n_latent_vectors, d]
+                # grad_s = (grad_s - grad_s.mean(dim=(-2, -1), keepdim=True)) / (grad_s.std(dim=(-2, -1), keepdim=True) + 1e-6) # [b, n_latent_vectors, d]
                 # grad_s = self.grad_normalizer(grad_s) # [b, n_latent_vectors, d]
-            elif self.config.model.ttt["grad_mode"] == "zero":
+                grad_s = self.ttt_grad_normalizers[i](grad_s) # [b, n_latent_vectors, d]
+            elif self.config.model.ttt.grad_mode == "zero":
                 grad_s = torch.zeros_like(s)
-            elif self.config.model.ttt["grad_mode"] == "random":
+            elif self.config.model.ttt.grad_mode == "random":
                 grad_s = torch.randn_like(s)
 
             # Collect gradient statistics
@@ -444,21 +448,21 @@ class Images2LatentScene(nn.Module):
             layer_metrics["grad_mean"] = torch.mean(torch.abs(grad_s)).item()
             layer_metrics["grad_std"] = torch.std(grad_s).item()
 
-            if self.config.model.ttt.get("detach_grad", False):
+            if self.config.model.ttt.detach_grad:
                 # If detach grad, the gradient will not flow into the decoder 
                 grad_s = grad_s.detach()
             
-            if self.config.model.ttt.get("opt_model", "mlp") == "adam":
+            if self.config.model.ttt.opt_model == "adam":
                 # Create Adam optimizer with the current state as parameter
                 state_param = nn.Parameter(s.clone().detach().requires_grad_(True))
                 state_param.grad = grad_s
                 
                 # Get Adam hyperparameters
-                adam_lr = self.config.model.ttt.adam.get("lr", 1e-3)
-                adam_beta1 = self.config.model.ttt.adam.get("beta1", 0.9)
-                adam_beta2 = self.config.model.ttt.adam.get("beta2", 0.999)
-                adam_eps = self.config.model.ttt.adam.get("eps", 1e-8)
-                adam_weight_decay = self.config.model.ttt.adam.get("weight_decay", 0.0)
+                adam_lr = self.config.model.ttt.adam.lr
+                adam_beta1 = self.config.model.ttt.adam.beta1
+                adam_beta2 = self.config.model.ttt.adam.beta2
+                adam_eps = self.config.model.ttt.adam.eps
+                adam_weight_decay = self.config.model.ttt.adam.weight_decay
                 
                 # Create Adam optimizer
                 optimizer = torch.optim.Adam(
@@ -473,10 +477,10 @@ class Images2LatentScene(nn.Module):
                 optimizer.step()
                 delta_s = state_param.data - s
             else:
-                if self.config.model.ttt.get("opt_model", "mlp") == "transformer3":
+                if self.config.model.ttt.opt_model == "transformer3":
                     opt_input = grad_s # [b, n_latent_vectors, d]
                 else:
-                    if self.config.model.ttt.get("detach_opt_input", False):
+                    if self.config.model.ttt.detach_opt_input:
                         # If detach opt input, the gradient will not flow into the opt input state.
                         opt_input_s = s.detach()
                     else:
@@ -511,8 +515,8 @@ class Images2LatentScene(nn.Module):
             s_update = delta_s * effective_lr
             
             # Apply update
-            if self.config.model.ttt.get("is_residual", True):
-                s = s + s_update
+            if self.config.model.ttt.is_residual:
+                s = s_update + (s.detach() if self.config.model.ttt.detach_residual else s)
                 # Relative update rates
                 # layer_metrics["relative_delta"] = (delta_s / (s + 1e-8)).mean().item()
                 # layer_metrics["relative_update"] = (s_update / (s + 1e-8)).mean().item()
@@ -542,14 +546,20 @@ class Images2LatentScene(nn.Module):
         self._in_ttt_mode = False
         ttt_metrics['final_state_norm'] = torch.norm(s).item()
 
+        if self.config.model.ttt.detach_decoder_input:
+            # If detach decoder input, the gradient will not flow into the decoder input.
+            decoder_input = s.detach().requires_grad_(True)
+        else:
+            decoder_input = s
+
         # last input loss after all optimizer layers
-        rendered_input, _ = self.decode(input, s, target_pose_tokens=input_pose_tokens)
+        rendered_input, _ = self.decode(input, decoder_input, target_pose_tokens=input_pose_tokens)
         input_loss_metrics = self.loss_computer(rendered_input, input.image)
         last_input_loss = input_loss_metrics["loss"]
         ttt_metrics["last_input_loss"] = last_input_loss.item()
 
         # last target loss after all optimizer layers
-        rendered_target, _ = self.decode(target, s, target_pose_tokens=target_pose_tokens)
+        rendered_target, _ = self.decode(target, decoder_input, target_pose_tokens=target_pose_tokens)
         target_loss_metrics = self.loss_computer(rendered_target, target.image)
         last_target_loss = target_loss_metrics["loss"]
         ttt_metrics["last_target_loss"] = last_target_loss.item()

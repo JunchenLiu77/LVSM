@@ -154,6 +154,10 @@ class Generator:
                 overrides.append('model.ttt.detach_opt_input=true')
             elif args.no_detach_opt_input is not None and args.no_detach_opt_input:
                 overrides.append('model.ttt.detach_opt_input=false')
+            if args.detach_residual is not None and args.detach_residual:
+                overrides.append('model.ttt.detach_residual=true')
+            elif args.no_detach_residual is not None and args.no_detach_residual:
+                overrides.append('model.ttt.detach_residual=false')
             if args.supervise_mode is not None:
                 overrides.append(f'model.ttt.supervise_mode={args.supervise_mode}')
         
@@ -288,7 +292,6 @@ module load cuda/11.8
 export OMP_NUM_THREADS=4
 export IBV_FORK_SAFE=1
 export MASTER_ADDR=localhost
-export MASTER_PORT=29502
 
 # Optimized NCCL settings (P2P and IB enabled for L40s or A100)
 # export NCCL_IB_DISABLE=1  # Uncomment to disable InfiniBand
@@ -320,7 +323,6 @@ echo
 srun --time {slurm['time']} uv run torchrun \\
     --nproc_per_node={args.gpus or 2} \\
     --master_addr=$MASTER_ADDR \\
-    --master_port=$MASTER_PORT \\
     {torchrun_script} \\
     --config {config_file}{override_str}
 
@@ -406,6 +408,10 @@ def main():
                         help='Detach opt input in TTT (encoder-decoder-ttt)')
     parser.add_argument('--no-detach-opt-input', action='store_true', default=None,
                         help='Do not detach opt input in TTT (encoder-decoder-ttt)')
+    parser.add_argument('--detach-residual', action='store_true', default=None,
+                        help='Detach residual in TTT (encoder-decoder-ttt)')
+    parser.add_argument('--no-detach-residual', action='store_true', default=None,
+                        help='Do not detach residual in TTT (encoder-decoder-ttt)')
     parser.add_argument('--ttt-adam-lr', type=float,
                         help='Adam learning rate (encoder-decoder-ttt)')
     parser.add_argument('--ttt-adam-beta1', type=float,
