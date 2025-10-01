@@ -118,6 +118,8 @@ class Generator:
                 overrides.append(f'model.transformer.n_latent_vectors={args.n_latent}')
             if args.ttt_layers is not None:
                 overrides.append(f'model.ttt.n_layer={args.ttt_layers}')
+            if args.n_iters_per_layer is not None:
+                overrides.append(f'model.ttt.n_iters_per_layer={args.n_iters_per_layer}')
             if args.is_residual is not None and args.is_residual:
                 overrides.append('model.ttt.is_residual=true')
             elif args.no_is_residual is not None and args.no_is_residual:
@@ -370,6 +372,8 @@ def main():
                         help='Number of latent vectors (encoder-decoder)')
     parser.add_argument('--ttt-layers', type=int,
                         help='Number of TTT layers (encoder-decoder-ttt)')
+    parser.add_argument('--n-iters-per-layer', type=int,
+                        help='Number of TTT iterations per layer (encoder-decoder-ttt)')
     parser.add_argument('--state-lr-mode', choices=['fixed', 'learnable'],
                         help='State learning rate mode (encoder-decoder-ttt)')
     parser.add_argument('--state-lr-init', type=float,
