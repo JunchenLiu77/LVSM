@@ -1,6 +1,7 @@
 # Copyright (c) 2025 Haian Jin. Created for the LVSM project (ICLR 2025).
 
 import os
+import copy
 import torch
 import torch.nn as nn
 from easydict import EasyDict as edict
@@ -179,13 +180,23 @@ class Images2LatentScene(nn.Module):
             self.ttt_learnable_state_lr = None
             print(f"Using fixed state_lr={self.config.model.ttt.state_lr}")
         
-        # Initialize LayerNorm modules for gradient and state normalization
-        # self.ttt_state_normalizers = nn.ModuleList()
+        # Initialize LayerNorm modules for gradient and state normalization.
+        if self.config.model.ttt.normalizer_type == "layer_norm":
+            normalizer_template = nn.LayerNorm(self.config.model.transformer.d, bias=False, elementwise_affine=self.config.model.ttt.normalizer_affine)
+        elif self.config.model.ttt.normalizer_type == "rms_norm":
+            normalizer_template = nn.RMSNorm(self.config.model.transformer.d, elementwise_affine=self.config.model.ttt.normalizer_affine)
+        else:
+            raise ValueError(f"Invalid normalizer type: {self.config.model.ttt.normalizer_type}")
+        
+        # Deep copy the templates to create independent instances
+        self.ttt_state_normalizers = nn.ModuleList()
         self.ttt_grad_normalizers = nn.ModuleList()
         for _ in range(self.config.model.ttt.n_layer * self.config.model.ttt.n_iters_per_layer):
-            # self.ttt_state_normalizers.append(nn.LayerNorm(self.config.model.transformer.d, bias=False))
-            self.ttt_grad_normalizers.append(nn.LayerNorm(self.config.model.transformer.d, bias=False))
-        # self.ttt_state_normalizers.append(nn.LayerNorm(self.config.model.transformer.d, bias=False))
+            self.ttt_state_normalizers.append(copy.deepcopy(normalizer_template))
+            self.ttt_grad_normalizers.append(copy.deepcopy(normalizer_template))
+        
+        # last layer normalizer
+        self.ttt_state_normalizers.append(copy.deepcopy(normalizer_template)) 
         
         if self.config.model.ttt.opt_model == "adam":
             # Adam option does not instantiate learnable optimizer blocks.
@@ -274,12 +285,6 @@ class Images2LatentScene(nn.Module):
                     )
                 )
                 print(f"Initialized TTT blocks as {self.config.model.ttt.n_blocks_per_layer} transformer blocks and no linear layers")
-        
-        # initialize normalizer weights
-        for i in range(self.config.model.ttt.n_layer * self.config.model.ttt.n_iters_per_layer):
-            # self.ttt_state_normalizers[i].apply(init_weights)
-            self.ttt_grad_normalizers[i].apply(init_weights)
-        # self.ttt_state_normalizers[-1].apply(init_weights)
         
         # initialize ttt blocks weights
         for block in self.ttt_blocks:
@@ -444,21 +449,27 @@ class Images2LatentScene(nn.Module):
                 if self.config.model.ttt.grad_mode == "normal":
                     grad_s = torch.autograd.grad(input_loss, decoder_input, create_graph=False, retain_graph=False)[0]
                     # grad_s = (grad_s - grad_s.mean(dim=(-2, -1), keepdim=True)) / (grad_s.std(dim=(-2, -1), keepdim=True) + 1e-6) # [b, n_latent_vectors, d]
-                    # grad_s = self.grad_normalizer(grad_s) # [b, n_latent_vectors, d]
-                    grad_s = self.ttt_grad_normalizers[i * self.config.model.ttt.n_iters_per_layer + j](grad_s) # [b, n_latent_vectors, d]
                 elif self.config.model.ttt.grad_mode == "zero":
                     grad_s = torch.zeros_like(s)
                 elif self.config.model.ttt.grad_mode == "random":
                     grad_s = torch.randn_like(s)
 
+                if self.config.model.ttt.detach_grad:
+                    # If detach grad, the gradient will not flow into the decoder 
+                    grad_s = grad_s.detach()
+
+                # normalize gradient after detach. otherwise the normalizer will get no gradients.
+                grad_norm = self.ttt_grad_normalizers[i * self.config.model.ttt.n_iters_per_layer + j]
+                grad_s = grad_norm(grad_s) # [b, n_latent_vectors, d]
+
+                # log the scaler factor of the normalizer
+                if (isinstance(grad_norm, nn.RMSNorm) or isinstance(grad_norm, nn.LayerNorm)) and grad_norm.elementwise_affine:
+                    layer_metrics["grad_norm_scaler"] = grad_norm.weight.mean().item()
+
                 # Collect gradient statistics
                 layer_metrics["grad_max"] = torch.max(torch.abs(grad_s)).item()
                 layer_metrics["grad_mean"] = torch.mean(torch.abs(grad_s)).item()
                 layer_metrics["grad_std"] = torch.std(grad_s).item()
-
-                if self.config.model.ttt.detach_grad:
-                    # If detach grad, the gradient will not flow into the decoder 
-                    grad_s = grad_s.detach()
                 
                 if self.config.model.ttt.opt_model == "adam":
                     # Create Adam optimizer with the current state as parameter
@@ -493,6 +504,20 @@ class Images2LatentScene(nn.Module):
                             opt_input_s = s.detach()
                         else:
                             opt_input_s = s
+
+                        # normalize the opt input state after detach as well.
+                        state_norm = self.ttt_state_normalizers[i * self.config.model.ttt.n_iters_per_layer + j]
+                        opt_input_s = state_norm(opt_input_s)
+
+                        # log the scaler factor of the normalizer
+                        if (isinstance(state_norm, nn.RMSNorm) or isinstance(state_norm, nn.LayerNorm)) and state_norm.elementwise_affine:
+                            layer_metrics["state_norm_scaler"] = state_norm.weight.mean().item()
+
+                        # record the opt input state -- state after normalizer
+                        layer_metrics["opt_state_max"] = torch.max(opt_input_s).item()
+                        layer_metrics["opt_state_mean"] = torch.mean(opt_input_s).item()
+                        layer_metrics["opt_state_std"] = torch.std(opt_input_s).item()
+
                         opt_input = torch.cat((opt_input_s, grad_s), dim=-1) # [b, n_latent_vectors, 2*d]
 
                     delta_s = self.ttt_blocks[i](opt_input) # [b, n_latent_vectors, d]

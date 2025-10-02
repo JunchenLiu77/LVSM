@@ -162,7 +162,13 @@ class Generator:
                 overrides.append('model.ttt.detach_residual=false')
             if args.supervise_mode is not None:
                 overrides.append(f'model.ttt.supervise_mode={args.supervise_mode}')
-        
+            if args.normalizer_type is not None:
+                overrides.append(f'model.ttt.normalizer_type={args.normalizer_type}')
+            if args.normalizer_affine is not None and args.normalizer_affine:
+                overrides.append('model.ttt.normalizer_affine=true')
+            elif args.no_normalizer_affine is not None and args.no_normalizer_affine:
+                overrides.append('model.ttt.normalizer_affine=false')
+                
         # Training configuration overrides
         if args.batch_size is not None:
             overrides.append(f'training.batch_size_per_gpu={args.batch_size}')
@@ -428,6 +434,12 @@ def main():
                         help='Adam weight decay (encoder-decoder-ttt)')
     parser.add_argument('--supervise-mode', choices=['last', 'average'],
                         help='Supervise mode (encoder-decoder-ttt)')
+    parser.add_argument('--normalizer-type', choices=['layer_norm', 'rms_norm'],
+                        help='Normalizer type (encoder-decoder-ttt)')
+    parser.add_argument('--normalizer-affine', action='store_true', default=None,
+                        help='Normalizer affine (encoder-decoder-ttt)')
+    parser.add_argument('--no-normalizer-affine', action='store_true', default=None,
+                        help='Do not normalizer affine (encoder-decoder-ttt)')
     
     # Training configuration
     parser.add_argument('--batch-size', type=int,
