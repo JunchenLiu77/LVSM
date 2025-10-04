@@ -182,9 +182,18 @@ class Images2LatentScene(nn.Module):
         
         # Initialize LayerNorm modules for gradient and state normalization.
         if self.config.model.ttt.normalizer_type == "layer_norm":
-            normalizer_template = nn.LayerNorm(self.config.model.transformer.d, bias=False, elementwise_affine=self.config.model.ttt.normalizer_affine)
+            normalizer_template = nn.LayerNorm(
+                self.config.model.transformer.d, 
+                bias=False, 
+                elementwise_affine=self.config.model.ttt.normalizer_affine, 
+                eps=self.config.model.ttt.normalizer_eps
+            )
         elif self.config.model.ttt.normalizer_type == "rms_norm":
-            normalizer_template = nn.RMSNorm(self.config.model.transformer.d, elementwise_affine=self.config.model.ttt.normalizer_affine)
+            normalizer_template = nn.RMSNorm(
+                self.config.model.transformer.d, 
+                elementwise_affine=self.config.model.ttt.normalizer_affine,
+                eps=self.config.model.ttt.normalizer_eps
+            )
         else:
             raise ValueError(f"Invalid normalizer type: {self.config.model.ttt.normalizer_type}")
         
@@ -194,9 +203,7 @@ class Images2LatentScene(nn.Module):
         for _ in range(self.config.model.ttt.n_layer * self.config.model.ttt.n_iters_per_layer):
             self.ttt_state_normalizers.append(copy.deepcopy(normalizer_template))
             self.ttt_grad_normalizers.append(copy.deepcopy(normalizer_template))
-        
-        # last layer normalizer
-        self.ttt_state_normalizers.append(copy.deepcopy(normalizer_template)) 
+        self.ttt_state_normalizers.append(copy.deepcopy(normalizer_template)) # last layer normalizer
         
         if self.config.model.ttt.opt_model == "adam":
             # Adam option does not instantiate learnable optimizer blocks.
@@ -248,7 +255,7 @@ class Images2LatentScene(nn.Module):
                         nn.Linear(self.config.model.transformer.d * 2, self.config.model.transformer.d * 4, bias=False),
                         nn.GELU(),
                         nn.Linear(self.config.model.transformer.d * 4, self.config.model.transformer.d, bias=False),
-                        nn.LayerNorm(self.config.model.transformer.d, bias=False),
+                        nn.LayerNorm(self.config.model.transformer.d, bias=False) if self.config.model.ttt.normalizer_type == "layer_norm" else nn.RMSNorm(self.config.model.transformer.d),
                         *[QK_Norm_TransformerBlock(
                             self.config.model.transformer.d,
                             self.config.model.transformer.d_head,
@@ -385,7 +392,11 @@ class Images2LatentScene(nn.Module):
         posed_input_images = self.get_posed_input(
             images=input.image, ray_o=input.ray_o, ray_d=input.ray_d
         )
-        b, v_input, c, h, w = posed_input_images.size()
+        b, _, c, h, w = posed_input_images.size()
+        
+        # hacky way to pass only partial input views to the encoder
+        v_input = self.config.model.ttt.n_encoder_inputs
+        posed_input_images = posed_input_images[:, :v_input, ...]
         input_img_tokens = self.image_tokenizer(posed_input_images)  # [b*v, n_patches, d]
         _, n_patches, d = input_img_tokens.size()  # [b*v, n_patches, d]
         input_img_tokens = input_img_tokens.reshape(b, v_input * n_patches, d)  # [b, v*n_patches, d]
@@ -424,7 +435,8 @@ class Images2LatentScene(nn.Module):
         
         for i in range(self.config.model.ttt.n_layer):
             for j in range(self.config.model.ttt.n_iters_per_layer):
-                # s = self.ttt_state_normalizers[i * self.config.model.ttt.n_iters_per_layer + j](s)
+                idx = i * self.config.model.ttt.n_iters_per_layer + j
+                # s = self.ttt_state_normalizers[idx](s)
                 if self.config.model.ttt.detach_decoder_input:
                     # If detach decoder input, the gradient will not flow into the decoder input.
                     decoder_input = s.detach().requires_grad_(True)
@@ -434,8 +446,13 @@ class Images2LatentScene(nn.Module):
                 layer_metrics = {}
                 
                 # render input views and compute input loss
-                rendered_input, input_pose_tokens = self.decode(input, decoder_input, target_pose_tokens=input_pose_tokens)
-                input_loss_metrics = self.loss_computer(rendered_input, input.image)
+                rendered_input, input_pose_tokens = self.decode(
+                    input, 
+                    decoder_input, 
+                    target_pose_tokens=input_pose_tokens, 
+                    last_n=self.config.training.num_input_views - self.config.model.ttt.n_encoder_inputs
+                )
+                input_loss_metrics = self.loss_computer(rendered_input, input.image[:, self.config.model.ttt.n_encoder_inputs:, ...])
                 input_loss = input_loss_metrics["loss"]
                 layer_metrics["input_loss"] = input_loss.item()
 
@@ -448,7 +465,6 @@ class Images2LatentScene(nn.Module):
                 
                 if self.config.model.ttt.grad_mode == "normal":
                     grad_s = torch.autograd.grad(input_loss, decoder_input, create_graph=False, retain_graph=False)[0]
-                    # grad_s = (grad_s - grad_s.mean(dim=(-2, -1), keepdim=True)) / (grad_s.std(dim=(-2, -1), keepdim=True) + 1e-6) # [b, n_latent_vectors, d]
                 elif self.config.model.ttt.grad_mode == "zero":
                     grad_s = torch.zeros_like(s)
                 elif self.config.model.ttt.grad_mode == "random":
@@ -458,8 +474,14 @@ class Images2LatentScene(nn.Module):
                     # If detach grad, the gradient will not flow into the decoder 
                     grad_s = grad_s.detach()
 
+                # log gradient statistics before normalizer
+                layer_metrics["orig_grad_max"] = torch.max(torch.abs(grad_s)).item()
+                layer_metrics["orig_grad_mean"] = torch.mean(torch.abs(grad_s)).item()
+                layer_metrics["orig_grad_std"] = torch.std(grad_s).item()
+
                 # normalize gradient after detach. otherwise the normalizer will get no gradients.
-                grad_norm = self.ttt_grad_normalizers[i * self.config.model.ttt.n_iters_per_layer + j]
+                grad_s = grad_s / (grad_s.std(dim=(-1), keepdim=True) + 1e-10) # [b, n_latent_vectors, d]
+                grad_norm = self.ttt_grad_normalizers[idx]
                 grad_s = grad_norm(grad_s) # [b, n_latent_vectors, d]
 
                 # log the scaler factor of the normalizer
@@ -506,7 +528,7 @@ class Images2LatentScene(nn.Module):
                             opt_input_s = s
 
                         # normalize the opt input state after detach as well.
-                        state_norm = self.ttt_state_normalizers[i * self.config.model.ttt.n_iters_per_layer + j]
+                        state_norm = self.ttt_state_normalizers[idx]
                         opt_input_s = state_norm(opt_input_s)
 
                         # log the scaler factor of the normalizer
@@ -585,8 +607,13 @@ class Images2LatentScene(nn.Module):
             decoder_input = s
 
         # last input loss after all optimizer layers
-        rendered_input, _ = self.decode(input, decoder_input, target_pose_tokens=input_pose_tokens)
-        input_loss_metrics = self.loss_computer(rendered_input, input.image)
+        rendered_input, _ = self.decode(
+            input, 
+            decoder_input, 
+            target_pose_tokens=input_pose_tokens, 
+            last_n=self.config.training.num_input_views - self.config.model.ttt.n_encoder_inputs
+        )
+        input_loss_metrics = self.loss_computer(rendered_input, input.image[:, self.config.model.ttt.n_encoder_inputs:, ...])
         last_input_loss = input_loss_metrics["loss"]
         ttt_metrics["last_input_loss"] = last_input_loss.item()
 
@@ -595,6 +622,9 @@ class Images2LatentScene(nn.Module):
         target_loss_metrics = self.loss_computer(rendered_target, target.image)
         last_target_loss = target_loss_metrics["loss"]
         ttt_metrics["last_target_loss"] = last_target_loss.item()
+
+        # compute full input loss, only for logging images
+        rendered_input, _ = self.decode(input, decoder_input)
 
         if self.config.training.supervision == "input":
             loss = last_input_loss
@@ -610,16 +640,19 @@ class Images2LatentScene(nn.Module):
         return input_loss_metrics, target_loss_metrics, rendered_input, rendered_target, ttt_metrics, loss
     
     
-    def decode(self, target, latent_tokens, target_pose_tokens=None):
+    def decode(self, target, latent_tokens, target_pose_tokens=None, last_n=None):
         """
         Decode the target view images with the latent tokens and target poses.
         """
         checkpoint_every = self.config.training.grad_checkpoint_every
         n_latent_vectors = self.config.model.transformer.n_latent_vectors
         b, v_target = target.image.size()[:2]
+        if last_n is not None:
+            v_target = last_n
         
         if target_pose_tokens is None:
-            target_pose_cond= self.get_posed_input(ray_o=target.ray_o, ray_d=target.ray_d)
+            target_pose_cond= self.get_posed_input(ray_o=target.ray_o, ray_d=target.ray_d) # [b, v_target, c, h, w]
+            target_pose_cond = target_pose_cond[:, -v_target:, ...]
             target_pose_tokens = self.target_pose_tokenizer(target_pose_cond) # [b*v_target, n_patches, d]
         
         _, n_patches, d = target_pose_tokens.size()

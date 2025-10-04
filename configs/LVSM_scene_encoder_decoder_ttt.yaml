@@ -23,24 +23,26 @@ model:
     n_layer: 3
     n_iters_per_layer: 1
     n_blocks_per_layer: 1
-    state_lr: 1e0
+    state_lr: 1e-1
     state_lr_mode: learnable
-    state_lr_init: -4.0
+    state_lr_init: -2.0
     opt_model: transformer
     mlp_dim: 3072
     use_positional_encoding: true
     grad_mode: normal
     is_residual: true
     detach_s0: false
-    detach_grad: false
+    detach_grad: true
     detach_decoder_input: false
     detach_opt_input: false
     detach_residual: false
     supervise_mode: last
-    normalizer_type: rms_norm
-    normalizer_affine: false
+    normalizer_type: layer_norm
+    normalizer_affine: true
+    normalizer_eps: 1e-10
+    n_encoder_inputs: 1
     adam:
-      lr: 1e-2
+      lr: 1e-3
       beta1: 0.9
       beta2: 0.999
       eps: 1e-8
@@ -84,7 +86,7 @@ training:
   perceptual_loss_weight: 0.5
   
   # optimizer & scheduler
-  lr: 0.0004
+  lr: 5e-5
   warmup: 3000
   weight_decay: 0.05
   beta1: 0.9
@@ -110,7 +112,7 @@ training:
   print_every: 20
   wandb_log_every: 50
   vis_every: 1000
-  checkpoint_every: 1000
+  checkpoint_every: 5000
   log_grad_norm_details: false
 
   # freeze parameters

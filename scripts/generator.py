@@ -168,6 +168,10 @@ class Generator:
                 overrides.append('model.ttt.normalizer_affine=true')
             elif args.no_normalizer_affine is not None and args.no_normalizer_affine:
                 overrides.append('model.ttt.normalizer_affine=false')
+            if args.normalizer_eps is not None:
+                overrides.append(f'model.ttt.normalizer_eps={args.normalizer_eps}')
+            if args.n_encoder_inputs is not None:
+                overrides.append(f'model.ttt.n_encoder_inputs={args.n_encoder_inputs}')
                 
         # Training configuration overrides
         if args.batch_size is not None:
@@ -234,6 +238,12 @@ class Generator:
             overrides.append(f'training.use_torch_compile=true')
         elif args.no_torch_compile is not None and args.no_torch_compile:
             overrides.append(f'training.use_torch_compile=false')
+
+        # Input views and target views
+        if args.num_input_views is not None:
+            overrides.append(f'training.num_input_views={args.num_input_views}')
+        if args.num_target_views is not None:
+            overrides.append(f'training.num_target_views={args.num_target_views}')
         
         return overrides
     
@@ -300,6 +310,7 @@ module load cuda/11.8
 export OMP_NUM_THREADS=4
 export IBV_FORK_SAFE=1
 export MASTER_ADDR=localhost
+export MASTER_PORT=$(shuf -i 20000-65000 -n 1)
 
 # Optimized NCCL settings (P2P and IB enabled for L40s or A100)
 # export NCCL_IB_DISABLE=1  # Uncomment to disable InfiniBand
@@ -331,6 +342,7 @@ echo
 srun --time {slurm['time']} uv run torchrun \\
     --nproc_per_node={args.gpus or 2} \\
     --master_addr=$MASTER_ADDR \\
+    --master_port=$MASTER_PORT \\
     {torchrun_script} \\
     --config {config_file}{override_str}
 
@@ -440,6 +452,10 @@ def main():
                         help='Normalizer affine (encoder-decoder-ttt)')
     parser.add_argument('--no-normalizer-affine', action='store_true', default=None,
                         help='Do not normalizer affine (encoder-decoder-ttt)')
+    parser.add_argument('--normalizer-eps', type=float,
+                        help='Normalizer eps (encoder-decoder-ttt)')
+    parser.add_argument('--n-encoder-inputs', type=int,
+                        help='Number of encoder inputs (encoder-decoder-ttt)')
     
     # Training configuration
     parser.add_argument('--batch-size', type=int,
@@ -486,6 +502,10 @@ def main():
                         help='Enable torch.compile for model optimization')
     parser.add_argument('--no-torch-compile', action='store_true', default=None,
                         help='Disable torch.compile')
+    parser.add_argument('--num-input-views', type=int,
+                        help='Number of input views')
+    parser.add_argument('--num-target-views', type=int,
+                        help='Number of target views')
     
     # Inference mode
     parser.add_argument('--inference', action='store_true', default=None,
