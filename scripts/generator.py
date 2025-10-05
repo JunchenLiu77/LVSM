@@ -172,6 +172,8 @@ class Generator:
                 overrides.append(f'model.ttt.normalizer_eps={args.normalizer_eps}')
             if args.n_encoder_inputs is not None:
                 overrides.append(f'model.ttt.n_encoder_inputs={args.n_encoder_inputs}')
+            if args.distill_factor is not None:
+                overrides.append(f'model.ttt.distill_factor={args.distill_factor}')
                 
         # Training configuration overrides
         if args.batch_size is not None:
@@ -456,6 +458,8 @@ def main():
                         help='Normalizer eps (encoder-decoder-ttt)')
     parser.add_argument('--n-encoder-inputs', type=int,
                         help='Number of encoder inputs (encoder-decoder-ttt)')
+    parser.add_argument('--distill-factor', type=float,
+                        help='Distillation factor (encoder-decoder-ttt)')
     
     # Training configuration
     parser.add_argument('--batch-size', type=int,

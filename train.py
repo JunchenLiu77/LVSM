@@ -287,8 +287,6 @@ while cur_train_step <= total_train_steps:
             # Add TTT metrics to logging
             if hasattr(ret_dict, 'ttt_metrics') and ret_dict.ttt_metrics is not None:
                 ttt_metrics = ret_dict.ttt_metrics
-                log_dict['ttt/initial_state_norm'] = ttt_metrics['initial_state_norm']
-                log_dict['ttt/final_state_norm'] = ttt_metrics['final_state_norm']
                 
                 # Log per-layer metrics
                 if 'layers' in ttt_metrics and len(ttt_metrics['layers']) > 0:

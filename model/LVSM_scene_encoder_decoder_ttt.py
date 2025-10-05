@@ -4,6 +4,7 @@ import os
 import copy
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from easydict import EasyDict as edict
 from einops.layers.torch import Rearrange
 from einops import rearrange, repeat
@@ -27,6 +28,10 @@ class Images2LatentScene(nn.Module):
         
         # Initialize TTT blocks (or say learnable optimizers)
         self._init_ttt()
+        if self.config.model.ttt.distill_factor > 0.0:
+            print(f"Enable encoder-optimizer distillation with factor={self.config.model.ttt.distill_factor}")
+        else:
+            print("No encoder-optimizer distillation is enabled")
         
         # Initialize loss computer
         self.loss_computer = LossComputer(config)
@@ -393,26 +398,40 @@ class Images2LatentScene(nn.Module):
             images=input.image, ray_o=input.ray_o, ray_d=input.ray_d
         )
         b, _, c, h, w = posed_input_images.size()
-        
-        # hacky way to pass only partial input views to the encoder
+
+        # latent token with only using the first n_encoder_inputs input views
         v_input = self.config.model.ttt.n_encoder_inputs
-        posed_input_images = posed_input_images[:, :v_input, ...]
-        input_img_tokens = self.image_tokenizer(posed_input_images)  # [b*v, n_patches, d]
+        partial_posed_input_images = posed_input_images[:, :v_input, ...]
+        input_img_tokens = self.image_tokenizer(partial_posed_input_images)  # [b*v, n_patches, d]
         _, n_patches, d = input_img_tokens.size()  # [b*v, n_patches, d]
         input_img_tokens = input_img_tokens.reshape(b, v_input * n_patches, d)  # [b, v*n_patches, d]
         latent_vector_tokens = self.n_light_field_latent.expand(b, -1, -1) # [b, n_latent_vectors, d]
         encoder_input_tokens = torch.cat((latent_vector_tokens, input_img_tokens), dim=1) # [b, n_latent_vectors + v*n_patches, d]
         intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint and not self._in_ttt_mode, checkpoint_every=checkpoint_every)
-        latent_tokens, input_img_tokens = intermediate_tokens.split([n_latent_vectors, v_input * n_patches], dim=1) # [b, n_latent_vectors, d], [b, v*n_patches, d]
-        return latent_tokens
+        partial_encoded_latents, input_img_tokens = intermediate_tokens.split([n_latent_vectors, v_input * n_patches], dim=1) # [b, n_latent_vectors, d], [b, v*n_patches, d]
+        
+        full_encoded_latents = None
+        if self.config.model.ttt.distill_factor > 0.0:
+            # latent token with using all input views, which provide teacher signal for distillation
+            v_input = posed_input_images.size(1)
+            input_img_tokens = self.image_tokenizer(posed_input_images)  # [b*v, n_patches, d]
+            _, n_patches, d = input_img_tokens.size()  # [b*v, n_patches, d]
+            input_img_tokens = input_img_tokens.reshape(b, v_input * n_patches, d)  # [b, v*n_patches, d]
+            latent_vector_tokens = self.n_light_field_latent.expand(b, -1, -1) # [b, n_latent_vectors, d]
+            encoder_input_tokens = torch.cat((latent_vector_tokens, input_img_tokens), dim=1) # [b, n_latent_vectors + v*n_patches, d]
+            intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint and not self._in_ttt_mode, checkpoint_every=checkpoint_every)
+            full_encoded_latents, input_img_tokens = intermediate_tokens.split([n_latent_vectors, v_input * n_patches], dim=1) # [b, n_latent_vectors, d], [b, v*n_patches, d]
+        
+        return partial_encoded_latents, full_encoded_latents
     
-    def ttt_update(self, input, target, s):
+    def ttt_update(self, input, target, partial_encoded_latents, full_encoded_latents):
         """
         Update the latent tokens with the TTT blocks. Returns the updated state and TTT metrics for logging.
         Args:
             input: Input data batch
             target: Target data batch
-            s: Latent tokens [b, n_latent_vectors, d]
+            partial_encoded_latents: Latent tokens with only using the first n_encoder_inputs input views [b, n_latent_vectors, d]
+            full_encoded_latents: Latent tokens with using all input views [b, n_latent_vectors, d]
         Returns:
             s: Updated latent tokens [b, n_latent_vectors, d]
             ttt_metrics: TTT metrics
@@ -421,13 +440,11 @@ class Images2LatentScene(nn.Module):
         self._in_ttt_mode = True
         
         # Initialize metrics collection
-        ttt_metrics = {
-            'initial_state_norm': torch.norm(s).item(),
-            'layers': []
-        }
+        ttt_metrics = {'layers': []}
         input_pose_tokens = None
         target_pose_tokens = None
 
+        s = partial_encoded_latents
         if self.config.model.ttt.detach_s0:
             # If detach s0, the gradient will not flow into encoder, tokenizer and the register_token.
             # We need to detach s but then make it require grad again for autograd.grad to work
@@ -463,6 +480,11 @@ class Images2LatentScene(nn.Module):
                     target_loss = target_loss_metrics["loss"]
                     layer_metrics["target_loss"] = target_loss.item()
                 
+                # compute the distillation loss
+                if self.config.model.ttt.distill_factor > 0.0:
+                    distillation_loss = F.mse_loss(s, full_encoded_latents)
+                    layer_metrics["distillation_loss"] = distillation_loss.item()
+
                 if self.config.model.ttt.grad_mode == "normal":
                     grad_s = torch.autograd.grad(input_loss, decoder_input, create_graph=False, retain_graph=False)[0]
                 elif self.config.model.ttt.grad_mode == "zero":
@@ -596,7 +618,7 @@ class Images2LatentScene(nn.Module):
 
         # Re-enable gradient checkpointing after TTT
         self._in_ttt_mode = False
-        ttt_metrics['final_state_norm'] = torch.norm(s).item()
+        # ttt_metrics['final_state_norm'] = torch.norm(s).item()
 
         # s = self.ttt_state_normalizers[-1](s)
 
@@ -623,6 +645,11 @@ class Images2LatentScene(nn.Module):
         last_target_loss = target_loss_metrics["loss"]
         ttt_metrics["last_target_loss"] = last_target_loss.item()
 
+        # last distillation loss after all optimizer layers
+        if self.config.model.ttt.distill_factor > 0.0:
+            last_distillation_loss = F.mse_loss(s, full_encoded_latents)
+            ttt_metrics["last_distillation_loss"] = last_distillation_loss.item()
+
         # compute full input loss, only for logging images
         rendered_input, _ = self.decode(input, decoder_input)
 
@@ -633,8 +660,13 @@ class Images2LatentScene(nn.Module):
             # otherwise, compute the last optimizer layer target loss
             if self.config.model.ttt.supervise_mode == "average":
                 loss = sum([layer_metrics["target_loss"] for layer_metrics in ttt_metrics["layers"]] + [last_target_loss]) / (self.config.model.ttt.n_layer + 1)
+                if self.config.model.ttt.distill_factor > 0.0:
+                    loss += sum([layer_metrics["distillation_loss"] for layer_metrics in ttt_metrics["layers"]] + [last_distillation_loss]) / (self.config.model.ttt.n_layer + 1) * self.config.model.ttt.distill_factor
             elif self.config.model.ttt.supervise_mode == "last":
                 loss = last_target_loss
+                if self.config.model.ttt.distill_factor > 0.0:
+                    loss += last_distillation_loss * self.config.model.ttt.distill_factor
+
         ttt_metrics["loss"] = loss.item()
         
         return input_loss_metrics, target_loss_metrics, rendered_input, rendered_target, ttt_metrics, loss
@@ -686,8 +718,8 @@ class Images2LatentScene(nn.Module):
     def forward(self, data_batch, has_target_image=True):
         assert has_target_image, "JC: we might need to support this?"
         input, target = self.process_data(data_batch, has_target_image=has_target_image, target_has_input = self.config.training.target_has_input, compute_rays=True)
-        latent_tokens = self.encode(input)
-        input_loss_metrics, target_loss_metrics, rendered_input, rendered_target, ttt_metrics, loss = self.ttt_update(input, target, latent_tokens)
+        partial_encoded_latents, full_encoded_latents = self.encode(input)
+        input_loss_metrics, target_loss_metrics, rendered_input, rendered_target, ttt_metrics, loss = self.ttt_update(input, target, partial_encoded_latents, full_encoded_latents)
 
         result = edict(
             input=input,

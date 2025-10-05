@@ -37,6 +37,7 @@ model:
     detach_opt_input: false
     detach_residual: false
     supervise_mode: last
+    distill_factor: 0.0
     normalizer_type: layer_norm
     normalizer_affine: true
     normalizer_eps: 1e-10
