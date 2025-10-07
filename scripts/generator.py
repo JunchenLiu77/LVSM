@@ -81,12 +81,12 @@ class Generator:
     def _build_overrides(self, args, output_dir):
         """Build configuration overrides from arguments"""
         overrides = []
+        # Dataset configuration
+        dataset_path = "/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/" + ("train" if not args.inference else "test") + "/full_list.txt"
+        overrides.append(f'training.dataset_path="{dataset_path}"')
         
         # Checkpoint directory
         overrides.append(f'training.checkpoint_dir="{output_dir}"')
-        
-        if args.dataset_path is not None:
-            overrides.append(f'training.dataset_path="{args.dataset_path}"')
         
         # Model configuration overrides
         if args.image_size is not None:
@@ -224,6 +224,8 @@ class Generator:
             overrides.append('inference.if_inference=true')
         elif args.no_inference is not None and args.no_inference:
             overrides.append('inference.if_inference=false')
+        if args.first_n_batches is not None:
+            overrides.append(f'inference.first_n_batches={args.first_n_batches}')
         
         # AMP settings
         if args.amp_dtype is not None and args.amp_dtype:
@@ -368,10 +370,6 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    # Dataset configuration
-    parser.add_argument('--dataset-path', type=str, default="/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/train/full_list.txt",
-                        help='Dataset path')
-    
     # Model selection
     parser.add_argument('--model', choices=['decoder-only', 'encoder-decoder', 'encoder-decoder-ttt'], 
                         default='decoder-only',
@@ -511,11 +509,13 @@ def main():
     parser.add_argument('--num-target-views', type=int,
                         help='Number of target views')
     
-    # Inference mode
+    # Inference Configuration
     parser.add_argument('--inference', action='store_true', default=None,
                         help='Generate inference script instead of training')
     parser.add_argument('--no-inference', action='store_true', default=None,
                         help='Generate training script instead of inference')
+    parser.add_argument('--first-n-batches', type=int,
+                        help='Number of batches in testset to run')
     
     # SLURM configuration
     parser.add_argument('--time', type=str,

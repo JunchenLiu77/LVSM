@@ -126,7 +126,8 @@ training:
 # inference / evaluation
 inference:
   if_inference: False # whether to use testset or not.
-  compute_metrics: False
+  compute_metrics: True
+  first_n_batches: None
   view_idx_file_path: ./data/evaluation_index_re10k.json
   render_video: False
   render_video_config:

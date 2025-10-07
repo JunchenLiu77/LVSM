@@ -116,7 +116,10 @@ def compute_ssim(
 
 @torch.no_grad()
 def export_results(
-    result: edict,
+    input,
+    target,
+    rendered_input,
+    rendered_target,
     out_dir: str, 
     compute_metrics: bool = False
 ):
@@ -124,39 +127,42 @@ def export_results(
     Save results including images and optional metrics and videos.
     
     Args:
-        result: EasyDict containing input, target, and rendered images, and optionally video frames
+        input: Input data batch
+        target: Target data batch
         out_dir: Directory to save the evaluation results
         compute_metrics: Whether to compute and save metrics
     """
     os.makedirs(out_dir, exist_ok=True)
     
-    input_data, target_data = result.input, result.target
-    
-    for batch_idx in range(input_data.image.size(0)):
-        uid = input_data.index[batch_idx, 0, -1].item()
-        scene_name = input_data.scene_name[batch_idx]
+    for batch_idx in range(input.image.size(0)):
+        uid = input.index[batch_idx, 0, -1].item()
+        scene_name = input.scene_name[batch_idx]
         sample_dir = os.path.join(out_dir, f"{uid:06d}")
         os.makedirs(sample_dir, exist_ok=True)
         
         # Get target view indices
-        target_indices = target_data.index[batch_idx, :, 0].cpu().numpy()
+        input_indices = input.index[batch_idx, :, 0].cpu().numpy()
+        target_indices = target.index[batch_idx, :, 0].cpu().numpy()
         
         # Save images
-        _save_images(result, batch_idx, sample_dir)
+        _save_images(input, target, rendered_input, rendered_target, batch_idx, sample_dir)
         
         # Compute and save metrics if requested
         if compute_metrics:
             _save_metrics(
-                target_data.image[batch_idx],
-                result.render[batch_idx],
+                input.image[batch_idx],
+                target.image[batch_idx],
+                rendered_input[batch_idx],
+                rendered_target[batch_idx],
+                input_indices,
                 target_indices,
                 sample_dir,
                 scene_name
             )
         
         # Save video if available
-        if hasattr(result, "video_rendering"):
-            _save_video(result.video_rendering[batch_idx], sample_dir)
+        # if hasattr(result, "video_rendering"):
+        #     _save_video(result.video_rendering[batch_idx], sample_dir)
 
 
 def visualize_intermediate_results(out_dir, input, target, rendered_input, rendered_target):
@@ -216,45 +222,80 @@ def visualize_intermediate_results(out_dir, input, target, rendered_input, rende
     )
 
 
-def _save_images(result, batch_idx, out_dir):
+def _save_images(input, target, rendered_input, rendered_target, batch_idx, out_dir):
     """Save visualization images."""
     # Save input image
-    input_img = result.input.image[batch_idx]
-    input_img = rearrange(input_img, "v c h w -> h (v w) c")
-    input_img = (input_img.cpu().numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
-    Image.fromarray(input_img).save(os.path.join(out_dir, "input.png"))
+    # input_img = input.image[batch_idx]
+    # input_img = rearrange(input_img, "v c h w -> h (v w) c")
+    # input_img = (input_img.cpu().numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
+    # Image.fromarray(input_img).save(os.path.join(out_dir, "input.png"))
 
-    # Save GT vs prediction side-by-side
+    # Save GT input vs rendered input side-by-side
     comparison = torch.cat(
-        (result.target.image[batch_idx], result.render[batch_idx]), 
+        (input.image[batch_idx], rendered_input[batch_idx]), 
         dim=2
     ).detach().cpu()
     comparison = rearrange(comparison, "v c h w -> h (v w) c")
     comparison = (comparison.numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
-    Image.fromarray(comparison).save(os.path.join(out_dir, "gt_vs_pred.png"))
+    Image.fromarray(comparison).save(os.path.join(out_dir, "gt_vs_pred_input.png"))
+
+    # Save GT target vs rendered target side-by-side
+    comparison = torch.cat(
+        (target.image[batch_idx], rendered_target[batch_idx]), 
+        dim=2
+    ).detach().cpu()
+    comparison = rearrange(comparison, "v c h w -> h (v w) c")
+    comparison = (comparison.numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
+    Image.fromarray(comparison).save(os.path.join(out_dir, "gt_vs_pred_target.png"))
     
 
-def _save_metrics(target, prediction, view_indices, out_dir, scene_name):
+def _save_metrics(input, target, rendered_input, rendered_target, input_indices, target_indices, out_dir, scene_name):
+    n_input_views = rendered_input.size(0)
+    n_target_views = rendered_target.size(0)
+    input = input.to(torch.float32)
     target = target.to(torch.float32)
-    prediction = prediction.to(torch.float32)
+    rendered_input = rendered_input.to(torch.float32)
+    rendered_target = rendered_target.to(torch.float32)
     
-    psnr_values = compute_psnr(target, prediction)
-    lpips_values = compute_lpips(target, prediction)
-    ssim_values = compute_ssim(target, prediction)
+    # compute metrics for input
+    input_psnr_values = compute_psnr(input, rendered_input)
+    input_lpips_values = compute_lpips(input, rendered_input)
+    input_ssim_values = compute_ssim(input, rendered_input)
+    
+    # compute metrics for target
+    target_psnr_values = compute_psnr(target, rendered_target)
+    target_lpips_values = compute_lpips(target, rendered_target)
+    target_ssim_values = compute_ssim(target, rendered_target)
 
     metrics = {
         "summary": {
             "scene_name": scene_name,
-            "psnr": float(psnr_values.mean()),
-            "lpips": float(lpips_values.mean()),
-            "ssim": float(ssim_values.mean())
+            "input_psnr": float(input_psnr_values.mean()),
+            "input_lpips": float(input_lpips_values.mean()),
+            "input_ssim": float(input_ssim_values.mean()),
+            "target_psnr": float(target_psnr_values.mean()),
+            "target_lpips": float(target_lpips_values.mean()),
+            "target_ssim": float(target_ssim_values.mean()),
+            "n_input_views": n_input_views,
+            "n_target_views": n_target_views
         },
-        "per_view": []
+        "input_view": [],
+        "target_view": []
     }
+    for i, view_idx in enumerate(input_indices):
+        metrics["input_view"].append({
+            "view": int(view_idx), 
+            "input_psnr": float(input_psnr_values[i]), 
+            "input_lpips": float(input_lpips_values[i]), 
+            "input_ssim": float(input_ssim_values[i])
+        })
     
-    for i, view_idx in enumerate(view_indices):
-        metrics["per_view"].append({
-            "view": int(view_idx), "psnr": float(psnr_values[i]), "lpips": float(lpips_values[i]), "ssim": float(ssim_values[i])
+    for i, view_idx in enumerate(target_indices):
+        metrics["target_view"].append({
+            "view": int(view_idx), 
+            "target_psnr": float(target_psnr_values[i]), 
+            "target_lpips": float(target_lpips_values[i]), 
+            "target_ssim": float(target_ssim_values[i])
         })
     
     # Save metrics to a single JSON file

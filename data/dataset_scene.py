@@ -31,20 +31,20 @@ class Dataset(Dataset):
         # Load file that specifies the input and target view indices to use for inference
         if self.inference:
             self.view_idx_list = dict()
-            if self.config.inference.get("view_idx_file_path", None) is not None:
-                if os.path.exists(self.config.inference.view_idx_file_path):
-                    with open(self.config.inference.view_idx_file_path, 'r') as f:
-                        self.view_idx_list = json.load(f)
-                        # filter out None values, i.e. scenes that don't have specified input and targetviews
-                        self.view_idx_list_filtered = [k for k, v in self.view_idx_list.items() if v is not None]
-                    filtered_scene_paths = []
-                    for scene in self.all_scene_paths:
-                        file_name = scene.split("/")[-1]
-                        scene_name = file_name.split(".")[0]
-                        if scene_name in self.view_idx_list_filtered:
-                            filtered_scene_paths.append(scene)
+            assert self.config.inference["view_idx_file_path"] is not None and os.path.exists(self.config.inference["view_idx_file_path"]), "view_idx_file_path must be provided for inference"
+            with open(self.config.inference["view_idx_file_path"], 'r') as f:
+                self.view_idx_list = json.load(f)
+                # filter out None values, i.e. scenes that don't have specified input and targetviews
+                self.view_idx_list_filtered = [k for k, v in self.view_idx_list.items() if v is not None]
+                filtered_scene_paths = []
+                for scene in self.all_scene_paths:
+                    file_name = scene.split("/")[-1]
+                    scene_name = file_name.split(".")[0]
+                    if scene_name in self.view_idx_list_filtered:
+                        filtered_scene_paths.append(scene)
 
-                    self.all_scene_paths = filtered_scene_paths
+                self.all_scene_paths = filtered_scene_paths
+            print(f"Found {len(self.view_idx_list_filtered)} scenes in index file, {len(self.all_scene_paths)} scenes exist in the dataset.")
 
 
     def __len__(self):
