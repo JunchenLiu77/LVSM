@@ -446,7 +446,7 @@ def main():
                         help='Adam eps (encoder-decoder-ttt)')
     parser.add_argument('--ttt-adam-weight-decay', type=float,
                         help='Adam weight decay (encoder-decoder-ttt)')
-    parser.add_argument('--supervise-mode', choices=['last', 'average'],
+    parser.add_argument('--supervise-mode', choices=['last', 'average', 'g3r'],
                         help='Supervise mode (encoder-decoder-ttt)')
     parser.add_argument('--normalizer-type', choices=['layer_norm', 'rms_norm'],
                         help='Normalizer type (encoder-decoder-ttt)')

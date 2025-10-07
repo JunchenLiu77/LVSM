@@ -83,6 +83,7 @@ module, class_name = config.model.class_name.rsplit(".", 1)
 LVSM = importlib.import_module(module).__dict__[class_name]
 model = LVSM(config).to(ddp_info.device)
 model = DDP(model, device_ids=[ddp_info.local_rank], find_unused_parameters=True)
+is_ttt = "ttt" in module
 
 
 optimizer, optimized_param_dict, all_param_dict = create_optimizer(
@@ -90,7 +91,7 @@ optimizer, optimized_param_dict, all_param_dict = create_optimizer(
     config.training.weight_decay,
     config.training.lr,
     (config.training.beta1, config.training.beta2),
-    is_ttt="ttt" in module,
+    is_ttt=is_ttt,
     freeze_encoder=config.training.get("freeze_encoder", False),
     freeze_decoder=config.training.get("freeze_decoder", False),
     freeze_tokenizer=config.training.get("freeze_tokenizer", False),
@@ -174,91 +175,142 @@ while cur_train_step <= total_train_steps:
 
     batch = {k: v.to(ddp_info.device) if type(v) == torch.Tensor else v for k, v in data.items()}
 
-
-    with torch.autocast(
-        enabled=config.training.use_amp,
-        device_type="cuda",
-        dtype=amp_dtype_mapping[config.training.amp_dtype],
-    ):
-        ret_dict = model(batch)
-
-    update_grads = (cur_train_step + 1) % grad_accum_steps == 0 or cur_train_step == total_train_steps
-    loss = ret_dict.loss
+    n_iters = 1
+    if is_ttt and config.model.ttt.supervise_mode == "g3r":
+        # When we follow the G3R supervision manner, we backpropagate the supervision loss n times per data sample.
+        n_iters = config.model.ttt.n_layer * config.model.ttt.n_iters_per_layer + 1
+        # doesn't have model parameter synchronization here, so we can use model.module directly
+        input = None
+        target = None
+        s = None
+        full_encoded_latents = None
+        input_pose_tokens = None
+        target_pose_tokens = None
+        ttt_metrics = {"layers": []}
     
-    if update_grads:
-        with model.no_sync(): # no sync grads for efficiency
-            scaler.scale(loss / grad_accum_steps).backward()
-    else:
-        scaler.scale(loss / grad_accum_steps).backward()
-    cur_train_step += 1
+    for idx in range(n_iters):
+        with torch.autocast(
+            enabled=config.training.use_amp,
+            device_type="cuda",
+            dtype=amp_dtype_mapping[config.training.amp_dtype],
+        ):
+            if is_ttt and config.model.ttt.supervise_mode == "g3r":
+                is_last = (idx == n_iters - 1)
+                layer_idx = idx // config.model.ttt.n_iters_per_layer
+                iter_idx = idx % config.model.ttt.n_iters_per_layer
+                # TODO: kinda hacky here
+                if is_last:
+                    layer_idx = config.model.ttt.n_layer - 1
+                    iter_idx = config.model.ttt.n_iters_per_layer - 1
+                
+                input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics = model(
+                    batch,
+                    has_target_image=True,
+                    layer_idx=layer_idx,
+                    iter_idx=iter_idx,
+                    input=input,
+                    target=target,
+                    s=s,
+                    full_encoded_latents=full_encoded_latents,
+                    input_pose_tokens=input_pose_tokens,
+                    target_pose_tokens=target_pose_tokens,
+                    update=not is_last
+                )
+                s = s.detach().requires_grad_(True)
+                full_encoded_latents = full_encoded_latents.detach() if full_encoded_latents is not None else None
+                input_pose_tokens = input_pose_tokens.detach()
+                target_pose_tokens = target_pose_tokens.detach()
+                
+                if not is_last:
+                    ttt_metrics['layers'].append(layer_metrics)
+                else:
+                    last_layer_metrics = layer_metrics
+                    ttt_metrics["last_input_loss"] = last_layer_metrics["input_loss"]
+                    ttt_metrics["last_target_loss"] = last_layer_metrics["target_loss"]
+                    if config.model.ttt.distill_factor > 0.0:
+                        ttt_metrics["last_distillation_loss"] = last_layer_metrics["distillation_loss"]
+            else:
+                input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(batch)
 
-    export_inter_results = ((cur_train_step-1) == start_train_step) or (cur_train_step % config.training.vis_every == 0)
-
-    if update_grads:
-        skip_optimizer_step = False
-        # Skip optimizer step if loss is NaN or Inf
-        if torch.isnan(loss) or torch.isinf(loss):
-            print(f"NaN or Inf loss detected, skip this iteration")
-            skip_optimizer_step = True
-            if config.training.supervision == "target":
-                ret_dict.target_loss_metrics.loss.data = torch.zeros_like(loss)
-            elif config.training.supervision == "input":
-                ret_dict.input_loss_metrics.loss.data = torch.zeros_like(loss)
-
-        total_grad_norm = None
-        # Check gradient norm and update optimizer if everything is fine
-        if not skip_optimizer_step:
-            # Unscales the gradients
-            scaler.unscale_(optimizer) 
-            # For all gradients, we safely change the NaN -> 0., inf -> 1e-6, -inf -> 1e-6.
-            with torch.no_grad():
-                for n, p in optimized_param_dict.items():
-                    if p.requires_grad and (p.grad is not None):
-                        p.grad.nan_to_num_(nan=0.0, posinf=1e-6, neginf=-1e-6)
+        update_grads = (cur_train_step + 1) % grad_accum_steps == 0 or cur_train_step == total_train_steps
         
-            # visualize the grad norm of each layer of our transformer (FOR DEBUG)
-            if ddp_info.is_main_process and config.training.get("log_grad_norm_details", False):
-                grad_norms = {}  # Dictionary to store norms per layer
-                for name, param in model.named_parameters():
-                    if param.grad is not None:  # Some parameters might not have gradients
-                        grad_norms[name] = param.grad.detach().norm().item()  # Detach for safety
-                for layer_name, grad_norm in grad_norms.items():
-                    wandb.log({"grad_norm_details/" + layer_name: grad_norm}, step=cur_train_step)
+        # Only sync gradients on the final gradient accumulation step
+        if update_grads:
+            # Final step in gradient accumulation - sync gradients
+            scaler.scale(loss / grad_accum_steps).backward()
+        else:
+            # Intermediate step - don't sync yet
+            with model.no_sync():
+                scaler.scale(loss / grad_accum_steps).backward()
+        cur_train_step += 1
 
-            total_grad_norm = 0.0
-            if config.training.grad_clip_norm > 0:
-                total_grad_norm = torch.nn.utils.clip_grad_norm_(optim_param_list, max_norm=config.training.grad_clip_norm).item()
+        export_inter_results = ((cur_train_step-1) == start_train_step) or (cur_train_step % config.training.vis_every == 0)
 
-                if total_grad_norm > config.training.grad_clip_norm * 2.0:
-                    print(f"WARNING: step {cur_train_step} grad norm too large {total_grad_norm} > {config.training.grad_clip_norm * 2.0}")
+        if update_grads:
+            skip_optimizer_step = False
+            # Skip optimizer step if loss is NaN or Inf
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"NaN or Inf loss detected, skip this iteration")
+                skip_optimizer_step = True
+                if config.training.supervision == "target":
+                    target_loss_metrics.loss.data = torch.zeros_like(loss)
+                elif config.training.supervision == "input":
+                    input_loss_metrics.loss.data = torch.zeros_like(loss)
 
-                allowed_gradnorm = config.training.grad_clip_norm * config.training.get("allowed_gradnorm_factor", 5)
-                if total_grad_norm > allowed_gradnorm:
-                    skip_optimizer_step = True
-                    print(f"WARNING: step {cur_train_step} grad norm too large {total_grad_norm} > {allowed_gradnorm}, skipping optimizer step")
-
-                # show grad norm in wandb if it's too large
-                display_grad_norm = total_grad_norm > config.training.grad_clip_norm * 2.0 or total_grad_norm > allowed_gradnorm
-                if display_grad_norm and ddp_info.is_main_process:
-                    wandb.log({"grad_norm": total_grad_norm}, step=cur_train_step)
-
-            # since skip flag may be updated because of grad norm, we check it again
+            total_grad_norm = None
+            # Check gradient norm and update optimizer if everything is fine
             if not skip_optimizer_step:
-                scaler.step(optimizer)
-                cur_param_update_step += 1
+                # Unscales the gradients
+                scaler.unscale_(optimizer) 
+                # For all gradients, we safely change the NaN -> 0., inf -> 1e-6, -inf -> 1e-6.
+                with torch.no_grad():
+                    for n, p in optimized_param_dict.items():
+                        if p.requires_grad and (p.grad is not None):
+                            p.grad.nan_to_num_(nan=0.0, posinf=1e-6, neginf=-1e-6)
+            
+                # visualize the grad norm of each layer of our transformer (FOR DEBUG)
+                if ddp_info.is_main_process and config.training.get("log_grad_norm_details", False):
+                    grad_norms = {}  # Dictionary to store norms per layer
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:  # Some parameters might not have gradients
+                            grad_norms[name] = param.grad.detach().norm().item()  # Detach for safety
+                    for layer_name, grad_norm in grad_norms.items():
+                        wandb.log({"grad_norm_details/" + layer_name: grad_norm}, step=cur_train_step)
 
-        scaler.update()
-        lr_scheduler.step()
-        optimizer.zero_grad(set_to_none=True)
+                total_grad_norm = 0.0
+                if config.training.grad_clip_norm > 0:
+                    total_grad_norm = torch.nn.utils.clip_grad_norm_(optim_param_list, max_norm=config.training.grad_clip_norm).item()
+
+                    if total_grad_norm > config.training.grad_clip_norm * 2.0:
+                        print(f"WARNING: step {cur_train_step} grad norm too large {total_grad_norm} > {config.training.grad_clip_norm * 2.0}")
+
+                    allowed_gradnorm = config.training.grad_clip_norm * config.training.get("allowed_gradnorm_factor", 5)
+                    if total_grad_norm > allowed_gradnorm:
+                        skip_optimizer_step = True
+                        print(f"WARNING: step {cur_train_step} grad norm too large {total_grad_norm} > {allowed_gradnorm}, skipping optimizer step")
+
+                    # show grad norm in wandb if it's too large
+                    display_grad_norm = total_grad_norm > config.training.grad_clip_norm * 2.0 or total_grad_norm > allowed_gradnorm
+                    if display_grad_norm and ddp_info.is_main_process:
+                        wandb.log({"grad_norm": total_grad_norm}, step=cur_train_step)
+
+                # since skip flag may be updated because of grad norm, we check it again
+                if not skip_optimizer_step:
+                    scaler.step(optimizer)
+                    cur_param_update_step += 1
+
+            scaler.update()
+            lr_scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
 
     # log and save checkpoint
     if ddp_info.is_main_process:
-        target_loss_dict = {k: float(f"{v.item():.6f}") for k, v in ret_dict.target_loss_metrics.items()}
-        input_loss_dict = {k: float(f"{v.item():.6f}") for k, v in ret_dict.input_loss_metrics.items()}
+        target_loss_dict = {k: float(f"{v.item():.6f}") for k, v in target_loss_metrics.items()}
+        input_loss_dict = {k: float(f"{v.item():.6f}") for k, v in input_loss_metrics.items()}
         # print in console
         if (cur_train_step % config.training.print_every == 0) or (cur_train_step < 100 + start_train_step):
             print_str = f"[Epoch {int(cur_epoch):>3d}] | Forwad step: {int(cur_train_step):>6d} (Param update step: {int(cur_param_update_step):>6d})"
-            print_str += f" | Iter Time: {time.time() - tic:.2f}s | LR: {optimizer.param_groups[0]['lr']:.6f}"
+            print_str += f" | Iter Time: {(time.time() - tic)/n_iters:.2f}s | LR: {optimizer.param_groups[0]['lr']:.6f}"
             # Add loss values
             print_str += "\ntarget: "
             for k, v in target_loss_dict.items():
@@ -277,7 +329,7 @@ while cur_train_step <= total_train_steps:
                 "forward_pass_step": cur_train_step,
                 "param_update_step": cur_param_update_step,
                 "lr": optimizer.param_groups[0]["lr"],
-                "iter_time": time.time() - tic,
+                "iter_time": (time.time() - tic) / n_iters,
                 "grad_norm": total_grad_norm,
                 "epoch": cur_epoch,
             }
@@ -285,48 +337,42 @@ while cur_train_step <= total_train_steps:
             log_dict.update({"train/input/" + k: v for k, v in input_loss_dict.items()})
 
             # Add TTT metrics to logging
-            if hasattr(ret_dict, 'ttt_metrics') and ret_dict.ttt_metrics is not None:
-                ttt_metrics = ret_dict.ttt_metrics
-                
-                # Log per-layer metrics
-                if 'layers' in ttt_metrics and len(ttt_metrics['layers']) > 0:
-                    for i, layer_metrics in enumerate(ttt_metrics['layers']):
-                        for key, value in layer_metrics.items():
-                            log_dict[f'ttt/layer_{i}/{key}'] = value
-                    
-                    # Average metrics across layers
-                    layer_keys = ttt_metrics['layers'][0].keys()
-                    for key in layer_keys:
-                        values = [layer[key] for layer in ttt_metrics['layers']]
-                        log_dict[f'ttt/avg_{key}'] = sum(values) / len(values)
+            if is_ttt:
+                if config.model.ttt.supervise_mode != "g3r":
+                    assert ttt_metrics is not None, "TTT metrics are not found"
+                    # Log per-layer metrics
+                    if 'layers' in ttt_metrics and len(ttt_metrics['layers']) > 0:
+                        for i, layer_metrics in enumerate(ttt_metrics['layers']):
+                            for key, value in layer_metrics.items():
+                                log_dict[f'ttt/layer_{i}/{key}'] = value
             
-            # Add TTT gradient metrics
-            if hasattr(model.module if hasattr(model, 'module') else model, 'ttt_blocks'):
-                ttt_blocks = (model.module if hasattr(model, 'module') else model).ttt_blocks
-                total_ttt_grad_norm = 0.0
-                if ttt_blocks is not None:
-                    for i, block in enumerate(ttt_blocks):
-                        block_grad_norm = 0.0
-                        max_grad = 0.0
-                        for name, param in block.named_parameters():
-                            if param.grad is not None:
-                                grad_norm = torch.norm(param.grad).item()
-                                block_grad_norm += grad_norm * grad_norm
-                                max_grad = max(max_grad, torch.max(torch.abs(param.grad)).item())
-                        
-                        if block_grad_norm > 0:
-                            block_grad_norm = block_grad_norm ** 0.5
-                            log_dict[f'ttt/grad/block_{i}_norm'] = block_grad_norm
-                            log_dict[f'ttt/grad/block_{i}_max'] = max_grad
-                            total_ttt_grad_norm += block_grad_norm * block_grad_norm
-                        else:
-                            log_dict[f'ttt/grad/block_{i}_norm'] = 0.0
-                            log_dict[f'ttt/grad/block_{i}_max'] = 0.0
-                
-                if total_ttt_grad_norm > 0:
-                    log_dict['ttt/grad/total_norm'] = (total_ttt_grad_norm ** 0.5)
-                else:
-                    log_dict['ttt/grad/total_norm'] = 0.0
+                # Add TTT gradient metrics
+                if hasattr(model.module if hasattr(model, 'module') else model, 'ttt_blocks'):
+                    ttt_blocks = (model.module if hasattr(model, 'module') else model).ttt_blocks
+                    total_ttt_grad_norm = 0.0
+                    if ttt_blocks is not None:
+                        for i, block in enumerate(ttt_blocks):
+                            block_grad_norm = 0.0
+                            max_grad = 0.0
+                            for name, param in block.named_parameters():
+                                if param.grad is not None:
+                                    grad_norm = torch.norm(param.grad).item()
+                                    block_grad_norm += grad_norm * grad_norm
+                                    max_grad = max(max_grad, torch.max(torch.abs(param.grad)).item())
+                            
+                            if block_grad_norm > 0:
+                                block_grad_norm = block_grad_norm ** 0.5
+                                log_dict[f'ttt/grad/block_{i}_norm'] = block_grad_norm
+                                log_dict[f'ttt/grad/block_{i}_max'] = max_grad
+                                total_ttt_grad_norm += block_grad_norm * block_grad_norm
+                            else:
+                                log_dict[f'ttt/grad/block_{i}_norm'] = 0.0
+                                log_dict[f'ttt/grad/block_{i}_max'] = 0.0
+                    
+                    if total_ttt_grad_norm > 0:
+                        log_dict['ttt/grad/total_norm'] = (total_ttt_grad_norm ** 0.5)
+                    else:
+                        log_dict['ttt/grad/total_norm'] = 0.0
 
             wandb.log(
                 log_dict,
@@ -355,7 +401,7 @@ while cur_train_step <= total_train_steps:
         if export_inter_results:
             vis_path = os.path.join(config.training.checkpoint_dir, f"iter_{cur_train_step:08d}")
             os.makedirs(vis_path, exist_ok=True)
-            visualize_intermediate_results(vis_path, ret_dict)
+            visualize_intermediate_results(vis_path, input, target, rendered_input, rendered_target)
             torch.cuda.empty_cache()
             model.train()
 

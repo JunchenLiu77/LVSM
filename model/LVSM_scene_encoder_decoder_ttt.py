@@ -205,16 +205,15 @@ class Images2LatentScene(nn.Module):
         # Deep copy the templates to create independent instances
         self.ttt_state_normalizers = nn.ModuleList()
         self.ttt_grad_normalizers = nn.ModuleList()
-        for _ in range(self.config.model.ttt.n_layer * self.config.model.ttt.n_iters_per_layer):
+        for _ in range(self.config.model.ttt.n_layer):
             self.ttt_state_normalizers.append(copy.deepcopy(normalizer_template))
             self.ttt_grad_normalizers.append(copy.deepcopy(normalizer_template))
-        self.ttt_state_normalizers.append(copy.deepcopy(normalizer_template)) # last layer normalizer
         
         if self.config.model.ttt.opt_model == "adam":
             # Adam option does not instantiate learnable optimizer blocks.
-            # Updates are computed using torch.optim.Adam during ttt_update.
+            # Updates are computed using torch.optim.Adam during ttt_forward.
             self.ttt_blocks = None
-            print("Use Adam optimizers for TTT blocks, which will be created during ttt_update")
+            print("Use Adam optimizers for TTT blocks, which will be created during ttt_forward")
             return
         
         self.ttt_blocks = nn.ModuleList()
@@ -423,255 +422,7 @@ class Images2LatentScene(nn.Module):
             full_encoded_latents, input_img_tokens = intermediate_tokens.split([n_latent_vectors, v_input * n_patches], dim=1) # [b, n_latent_vectors, d], [b, v*n_patches, d]
         
         return partial_encoded_latents, full_encoded_latents
-    
-    def ttt_update(self, input, target, partial_encoded_latents, full_encoded_latents):
-        """
-        Update the latent tokens with the TTT blocks. Returns the updated state and TTT metrics for logging.
-        Args:
-            input: Input data batch
-            target: Target data batch
-            partial_encoded_latents: Latent tokens with only using the first n_encoder_inputs input views [b, n_latent_vectors, d]
-            full_encoded_latents: Latent tokens with using all input views [b, n_latent_vectors, d]
-        Returns:
-            s: Updated latent tokens [b, n_latent_vectors, d]
-            ttt_metrics: TTT metrics
-        """
-        # Disable gradient checkpointing during TTT to avoid double differentiation
-        self._in_ttt_mode = True
-        
-        # Initialize metrics collection
-        ttt_metrics = {'layers': []}
-        input_pose_tokens = None
-        target_pose_tokens = None
 
-        s = partial_encoded_latents
-        if self.config.model.ttt.detach_s0:
-            # If detach s0, the gradient will not flow into encoder, tokenizer and the register_token.
-            # We need to detach s but then make it require grad again for autograd.grad to work
-            s = s.detach().requires_grad_(True)
-        
-        for i in range(self.config.model.ttt.n_layer):
-            for j in range(self.config.model.ttt.n_iters_per_layer):
-                idx = i * self.config.model.ttt.n_iters_per_layer + j
-                # s = self.ttt_state_normalizers[idx](s)
-                if self.config.model.ttt.detach_decoder_input:
-                    # If detach decoder input, the gradient will not flow into the decoder input.
-                    decoder_input = s.detach().requires_grad_(True)
-                else:
-                    decoder_input = s
-
-                layer_metrics = {}
-                
-                # render input views and compute input loss
-                rendered_input, input_pose_tokens = self.decode(
-                    input, 
-                    decoder_input, 
-                    target_pose_tokens=input_pose_tokens, 
-                    last_n=self.config.training.num_input_views - self.config.model.ttt.n_encoder_inputs
-                )
-                input_loss_metrics = self.loss_computer(rendered_input, input.image[:, self.config.model.ttt.n_encoder_inputs:, ...])
-                input_loss = input_loss_metrics["loss"]
-                layer_metrics["input_loss"] = input_loss.item()
-
-                # render target views and compute target loss
-                if self.config.model.ttt.supervise_mode == "average":
-                    rendered_target, target_pose_tokens = self.decode(target, decoder_input, target_pose_tokens=target_pose_tokens)
-                    target_loss_metrics = self.loss_computer(rendered_target, target.image)
-                    target_loss = target_loss_metrics["loss"]
-                    layer_metrics["target_loss"] = target_loss.item()
-                
-                # compute the distillation loss
-                if self.config.model.ttt.distill_factor > 0.0:
-                    distillation_loss = F.mse_loss(s, full_encoded_latents)
-                    layer_metrics["distillation_loss"] = distillation_loss.item()
-
-                if self.config.model.ttt.grad_mode == "normal":
-                    grad_s = torch.autograd.grad(input_loss, decoder_input, create_graph=False, retain_graph=False)[0]
-                elif self.config.model.ttt.grad_mode == "zero":
-                    grad_s = torch.zeros_like(s)
-                elif self.config.model.ttt.grad_mode == "random":
-                    grad_s = torch.randn_like(s)
-
-                if self.config.model.ttt.detach_grad:
-                    # If detach grad, the gradient will not flow into the decoder 
-                    grad_s = grad_s.detach()
-
-                # log gradient statistics before normalizer
-                layer_metrics["orig_grad_max"] = torch.max(torch.abs(grad_s)).item()
-                layer_metrics["orig_grad_mean"] = torch.mean(torch.abs(grad_s)).item()
-                layer_metrics["orig_grad_std"] = torch.std(grad_s).item()
-
-                # normalize gradient after detach. otherwise the normalizer will get no gradients.
-                grad_s = grad_s / (grad_s.std(dim=(-1), keepdim=True) + 1e-10) # [b, n_latent_vectors, d]
-                grad_norm = self.ttt_grad_normalizers[idx]
-                grad_s = grad_norm(grad_s) # [b, n_latent_vectors, d]
-
-                # log the scaler factor of the normalizer
-                if (isinstance(grad_norm, nn.RMSNorm) or isinstance(grad_norm, nn.LayerNorm)) and grad_norm.elementwise_affine:
-                    layer_metrics["grad_norm_scaler"] = grad_norm.weight.mean().item()
-
-                # Collect gradient statistics
-                layer_metrics["grad_max"] = torch.max(torch.abs(grad_s)).item()
-                layer_metrics["grad_mean"] = torch.mean(torch.abs(grad_s)).item()
-                layer_metrics["grad_std"] = torch.std(grad_s).item()
-                
-                if self.config.model.ttt.opt_model == "adam":
-                    # Create Adam optimizer with the current state as parameter
-                    state_param = nn.Parameter(s.clone().detach().requires_grad_(True))
-                    state_param.grad = grad_s
-                    
-                    # Get Adam hyperparameters
-                    adam_lr = self.config.model.ttt.adam.lr
-                    adam_beta1 = self.config.model.ttt.adam.beta1
-                    adam_beta2 = self.config.model.ttt.adam.beta2
-                    adam_eps = self.config.model.ttt.adam.eps
-                    adam_weight_decay = self.config.model.ttt.adam.weight_decay
-                    
-                    # Create Adam optimizer
-                    optimizer = torch.optim.Adam(
-                        [state_param], 
-                        lr=adam_lr, 
-                        betas=(adam_beta1, adam_beta2), 
-                        eps=adam_eps, 
-                        weight_decay=adam_weight_decay
-                    )
-                    
-                    # update the state
-                    optimizer.step()
-                    delta_s = state_param.data - s
-                else:
-                    if self.config.model.ttt.opt_model == "transformer3":
-                        opt_input = grad_s # [b, n_latent_vectors, d]
-                    else:
-                        if self.config.model.ttt.detach_opt_input:
-                            # If detach opt input, the gradient will not flow into the opt input state.
-                            opt_input_s = s.detach()
-                        else:
-                            opt_input_s = s
-
-                        # normalize the opt input state after detach as well.
-                        state_norm = self.ttt_state_normalizers[idx]
-                        opt_input_s = state_norm(opt_input_s)
-
-                        # log the scaler factor of the normalizer
-                        if (isinstance(state_norm, nn.RMSNorm) or isinstance(state_norm, nn.LayerNorm)) and state_norm.elementwise_affine:
-                            layer_metrics["state_norm_scaler"] = state_norm.weight.mean().item()
-
-                        # record the opt input state -- state after normalizer
-                        layer_metrics["opt_state_max"] = torch.max(opt_input_s).item()
-                        layer_metrics["opt_state_mean"] = torch.mean(opt_input_s).item()
-                        layer_metrics["opt_state_std"] = torch.std(opt_input_s).item()
-
-                        opt_input = torch.cat((opt_input_s, grad_s), dim=-1) # [b, n_latent_vectors, 2*d]
-
-                    delta_s = self.ttt_blocks[i](opt_input) # [b, n_latent_vectors, d]
-                
-                # Collect TTT block output statistics
-                # layer_metrics["delta_s_max"] = torch.max(torch.abs(delta_s)).item()
-                # layer_metrics["delta_s_mean"] = torch.mean(torch.abs(delta_s)).item()
-                # layer_metrics["delta_s_std"] = torch.std(delta_s).item()
-                
-                # Get the effective state_lr for this layer
-                if self.ttt_learnable_state_lr is not None:
-                    # Use learnable state_lr with sigmoid activation
-                    state_lr = torch.sigmoid(self.ttt_learnable_state_lr[i])  # [D]
-                    # Expand to match delta_s shape for element-wise multiplication
-                    state_lr = state_lr.unsqueeze(0).unsqueeze(0)  # [1, 1, D]
-                    effective_lr = state_lr  # This will be broadcasted
-                    
-                    # For metrics, use mean of the activated lr values
-                    state_lr_value = torch.mean(state_lr).item()
-                else:
-                    # Use fixed state_lr from config
-                    state_lr_value = self.config.model.ttt.state_lr
-                    effective_lr = state_lr_value
-
-                layer_metrics["state_lr"] = state_lr_value
-                
-                # Apply update with effective learning rate
-                s_update = delta_s * effective_lr
-                
-                # Apply update
-                if self.config.model.ttt.is_residual:
-                    s = s_update + (s.detach() if self.config.model.ttt.detach_residual else s)
-                    # Relative update rates
-                    # layer_metrics["relative_delta"] = (delta_s / (s + 1e-8)).mean().item()
-                    # layer_metrics["relative_update"] = (s_update / (s + 1e-8)).mean().item()
-                else:   
-                    s = s_update
-                    # layer_metrics["relative_delta"] = ((s_update - s) / (s + 1e-8) / (effective_lr + 1e-8)).mean().item()
-                    # layer_metrics["relative_update"] = ((s_update - s) / (s + 1e-8)).mean().item()
-
-                # state statistics
-                layer_metrics["state_max"] = torch.max(s).item()
-                layer_metrics["state_mean"] = torch.mean(s).item()
-                layer_metrics["state_std"] = torch.std(s).item()
-                
-                # Add learnable lr statistics if applicable
-                if self.ttt_learnable_state_lr is not None:
-                    activated_lr = torch.sigmoid(self.ttt_learnable_state_lr[i])
-                    layer_metrics['state_lr_min'] = torch.min(activated_lr).item()
-                    layer_metrics['state_lr_max'] = torch.max(activated_lr).item()
-                    layer_metrics['state_lr_std'] = torch.std(activated_lr).item()
-                
-                ttt_metrics['layers'].append(layer_metrics)
-
-        # Re-enable gradient checkpointing after TTT
-        self._in_ttt_mode = False
-        # ttt_metrics['final_state_norm'] = torch.norm(s).item()
-
-        # s = self.ttt_state_normalizers[-1](s)
-
-        if self.config.model.ttt.detach_decoder_input:
-            # If detach decoder input, the gradient will not flow into the decoder input.
-            decoder_input = s.detach().requires_grad_(True)
-        else:
-            decoder_input = s
-
-        # last input loss after all optimizer layers
-        rendered_input, _ = self.decode(
-            input, 
-            decoder_input, 
-            target_pose_tokens=input_pose_tokens, 
-            last_n=self.config.training.num_input_views - self.config.model.ttt.n_encoder_inputs
-        )
-        input_loss_metrics = self.loss_computer(rendered_input, input.image[:, self.config.model.ttt.n_encoder_inputs:, ...])
-        last_input_loss = input_loss_metrics["loss"]
-        ttt_metrics["last_input_loss"] = last_input_loss.item()
-
-        # last target loss after all optimizer layers
-        rendered_target, _ = self.decode(target, decoder_input, target_pose_tokens=target_pose_tokens)
-        target_loss_metrics = self.loss_computer(rendered_target, target.image)
-        last_target_loss = target_loss_metrics["loss"]
-        ttt_metrics["last_target_loss"] = last_target_loss.item()
-
-        # last distillation loss after all optimizer layers
-        if self.config.model.ttt.distill_factor > 0.0:
-            last_distillation_loss = F.mse_loss(s, full_encoded_latents)
-            ttt_metrics["last_distillation_loss"] = last_distillation_loss.item()
-
-        # compute full input loss, only for logging images
-        rendered_input, _ = self.decode(input, decoder_input)
-
-        if self.config.training.supervision == "input":
-            loss = last_input_loss
-        elif self.config.training.supervision == "target":
-            # compute the final target loss for supervision, if "average", compute the average of all optimizer layers target loss
-            # otherwise, compute the last optimizer layer target loss
-            if self.config.model.ttt.supervise_mode == "average":
-                loss = sum([layer_metrics["target_loss"] for layer_metrics in ttt_metrics["layers"]] + [last_target_loss]) / (self.config.model.ttt.n_layer + 1)
-                if self.config.model.ttt.distill_factor > 0.0:
-                    loss += sum([layer_metrics["distillation_loss"] for layer_metrics in ttt_metrics["layers"]] + [last_distillation_loss]) / (self.config.model.ttt.n_layer + 1) * self.config.model.ttt.distill_factor
-            elif self.config.model.ttt.supervise_mode == "last":
-                loss = last_target_loss
-                if self.config.model.ttt.distill_factor > 0.0:
-                    loss += last_distillation_loss * self.config.model.ttt.distill_factor
-
-        ttt_metrics["loss"] = loss.item()
-        
-        return input_loss_metrics, target_loss_metrics, rendered_input, rendered_target, ttt_metrics, loss
-    
-    
     def decode(self, target, latent_tokens, target_pose_tokens=None, last_n=None):
         """
         Decode the target view images with the latent tokens and target poses.
@@ -714,25 +465,372 @@ class Images2LatentScene(nn.Module):
         )
         return rendered_images, target_pose_tokens
     
-    
-    def forward(self, data_batch, has_target_image=True):
-        assert has_target_image, "JC: we might need to support this?"
-        input, target = self.process_data(data_batch, has_target_image=has_target_image, target_has_input = self.config.training.target_has_input, compute_rays=True)
-        partial_encoded_latents, full_encoded_latents = self.encode(input)
-        input_loss_metrics, target_loss_metrics, rendered_input, rendered_target, ttt_metrics, loss = self.ttt_update(input, target, partial_encoded_latents, full_encoded_latents)
+    def _compute_ttt_loss(self, s, input, target, full_encoded_latents=None, input_pose_tokens=None, target_pose_tokens=None, compute_target_loss=False):
+        """
+        Compute losses for TTT layer.
+        
+        Args:
+            s: Current state tensor [b, n_latent_vectors, d]
+            input: Input batch data
+            target: Target batch data
+            full_encoded_latents: (Optional) Full encoded latents for distillation
+            input_pose_tokens: (Optional) Cached pose tokens for input views
+            target_pose_tokens: (Optional) Cached pose tokens for target views
+            compute_target_loss: (Optional) Whether to compute target loss
+        
+        Returns:
+            Tuple of (decoder_input, input_loss, target_loss, distillation_loss, layer_metrics, input_pose_tokens, target_pose_tokens)
+        """
+        if self.config.model.ttt.detach_decoder_input:
+            # If detach decoder input, the gradient will not flow into the decoder input.
+            decoder_input = s.detach().requires_grad_(True)
+        else:
+            decoder_input = s
 
-        result = edict(
-            input=input,
-            target=target,
-            input_loss_metrics=input_loss_metrics,
-            target_loss_metrics=target_loss_metrics,
-            rendered_input=rendered_input,
-            rendered_target=rendered_target,
-            ttt_metrics=ttt_metrics,
-            loss=loss
+        layer_metrics = {}
+        
+        # render input views and compute input loss
+        rendered_input, input_pose_tokens = self.decode(
+            input, 
+            decoder_input, 
+            target_pose_tokens=input_pose_tokens, 
+            last_n=self.config.training.num_input_views - self.config.model.ttt.n_encoder_inputs
+        )
+        input_loss_metrics = self.loss_computer(rendered_input, input.image[:, self.config.model.ttt.n_encoder_inputs:, ...])
+        layer_metrics["input_loss"] = input_loss_metrics["loss"].item()
+
+        # render target views and compute target loss
+        rendered_target = None
+        target_loss_metrics = None
+        if self.config.model.ttt.supervise_mode == "average" or self.config.model.ttt.supervise_mode == "g3r" or compute_target_loss:
+            rendered_target, target_pose_tokens = self.decode(target, decoder_input, target_pose_tokens=target_pose_tokens)
+            target_loss_metrics = self.loss_computer(rendered_target, target.image)
+            layer_metrics["target_loss"] = target_loss_metrics["loss"].item()
+        
+        # compute the distillation loss
+        distillation_loss = None
+        if self.config.model.ttt.distill_factor > 0.0:
+            assert full_encoded_latents is not None, "full_encoded_latents is required for distillation"
+            distillation_loss = F.mse_loss(s, full_encoded_latents)
+            layer_metrics["distillation_loss"] = distillation_loss.item()
+        
+        return decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, layer_metrics, input_pose_tokens, target_pose_tokens, rendered_input, rendered_target
+    
+
+    def _update_state_with_loss(self, s, decoder_input, grad_norm, state_norm, opt, input_loss, learnable_state_lr=None):
+        """
+        Update state using the computed loss.
+        
+        Args:
+            s: Current state tensor [b, n_latent_vectors, d]
+            decoder_input: Decoder input (may be detached from s)
+            grad_norm: Gradient normalizer
+            state_norm: State normalizer
+            opt: Optimizer
+            input_loss: Computed input loss
+            learnable_state_lr: (Optional) Learnable state learning rate
+        Returns:
+            Tuple of (updated_s, layer_metrics)
+        """
+        layer_metrics = {}
+        
+        if self.config.model.ttt.grad_mode == "normal":
+            # retrain_graph is needed for traversing the same computational graph the second time
+            grad_s = torch.autograd.grad(input_loss, decoder_input, create_graph=False, retain_graph=True)[0]
+        elif self.config.model.ttt.grad_mode == "zero":
+            grad_s = torch.zeros_like(s)
+        elif self.config.model.ttt.grad_mode == "random":
+            grad_s = torch.randn_like(s)
+
+        if self.config.model.ttt.detach_grad:
+            # If detach grad, the gradient will not flow into the decoder 
+            grad_s = grad_s.detach()
+
+        # log gradient statistics before normalizer
+        layer_metrics["orig_grad_max"] = torch.max(torch.abs(grad_s)).item()
+        layer_metrics["orig_grad_mean"] = torch.mean(torch.abs(grad_s)).item()
+        layer_metrics["orig_grad_std"] = torch.std(grad_s).item()
+
+        # normalize gradient after detach. otherwise the normalizer will get no gradients.
+        grad_s = grad_s / (grad_s.std(dim=(-1), keepdim=True) + 1e-10) # [b, n_latent_vectors, d]
+        grad_s = grad_norm(grad_s) # [b, n_latent_vectors, d]
+
+        # log the scale factor of the normalizer
+        if (isinstance(grad_norm, nn.RMSNorm) or isinstance(grad_norm, nn.LayerNorm)) and grad_norm.elementwise_affine:
+            layer_metrics["grad_norm_scaler"] = grad_norm.weight.mean().item()
+
+        # log gradient statistics
+        layer_metrics["grad_max"] = torch.max(torch.abs(grad_s)).item()
+        layer_metrics["grad_mean"] = torch.mean(torch.abs(grad_s)).item()
+        layer_metrics["grad_std"] = torch.std(grad_s).item()
+        
+        # update state with loss
+        if self.config.model.ttt.opt_model == "adam":
+            # Create Adam optimizer with the current state as parameter
+            state_param = nn.Parameter(s.clone().detach().requires_grad_(True))
+            state_param.grad = grad_s
+            
+            # Get Adam hyperparameters
+            adam_lr = self.config.model.ttt.adam.lr
+            adam_beta1 = self.config.model.ttt.adam.beta1
+            adam_beta2 = self.config.model.ttt.adam.beta2
+            adam_eps = self.config.model.ttt.adam.eps
+            adam_weight_decay = self.config.model.ttt.adam.weight_decay
+            
+            # Create Adam optimizer
+            optimizer = torch.optim.Adam(
+                [state_param], 
+                lr=adam_lr, 
+                betas=(adam_beta1, adam_beta2), 
+                eps=adam_eps, 
+                weight_decay=adam_weight_decay
+            )
+            
+            # update the state
+            optimizer.step()
+            delta_s = state_param.data - s
+        else:
+            if self.config.model.ttt.opt_model == "transformer3":
+                opt_input = grad_s # [b, n_latent_vectors, d]
+            else:
+                if self.config.model.ttt.detach_opt_input:
+                    # If detach opt input, the gradient will not flow into the opt input state.
+                    opt_input_s = s.detach()
+                else:
+                    opt_input_s = s
+
+                # normalize the opt input state after detach as well.
+                opt_input_s = state_norm(opt_input_s)
+
+                # log the scale factor of the normalizer
+                if (isinstance(state_norm, nn.RMSNorm) or isinstance(state_norm, nn.LayerNorm)) and state_norm.elementwise_affine:
+                    layer_metrics["state_norm_scaler"] = state_norm.weight.mean().item()
+
+                # log the opt input state -- state after normalizer
+                layer_metrics["opt_state_max"] = torch.max(opt_input_s).item()
+                layer_metrics["opt_state_mean"] = torch.mean(opt_input_s).item()
+                layer_metrics["opt_state_std"] = torch.std(opt_input_s).item()
+
+                opt_input = torch.cat((opt_input_s, grad_s), dim=-1) # [b, n_latent_vectors, 2*d]
+
+            delta_s = opt(opt_input) # [b, n_latent_vectors, d]
+        
+        # get the effective state_lr for this layer
+        if learnable_state_lr is not None:
+            # Use learnable state_lr with sigmoid activation
+            state_lr = torch.sigmoid(learnable_state_lr)  # [D]
+            # Expand to match delta_s shape for element-wise multiplication
+            state_lr = state_lr.unsqueeze(0).unsqueeze(0)  # [1, 1, D]
+            effective_lr = state_lr  # This will be broadcasted
+            
+            # For metrics, use mean of the activated lr values
+            state_lr_value = torch.mean(state_lr).item()
+        else:
+            # Use fixed state_lr from config
+            state_lr_value = self.config.model.ttt.state_lr
+            effective_lr = state_lr_value
+
+        layer_metrics["state_lr"] = state_lr_value
+        
+        # Apply update with effective learning rate
+        s_update = delta_s * effective_lr
+        
+        # Apply update
+        if self.config.model.ttt.is_residual:
+            s = s_update + (s.detach() if self.config.model.ttt.detach_residual else s)
+        else:   
+            s = s_update
+
+        # log state statistics
+        layer_metrics["state_max"] = torch.max(s).item()
+        layer_metrics["state_mean"] = torch.mean(s).item()
+        layer_metrics["state_std"] = torch.std(s).item()
+        
+        # log learnable lr statistics if applicable
+        if self.ttt_learnable_state_lr is not None:
+            activated_lr = torch.sigmoid(learnable_state_lr)
+            layer_metrics['state_lr_min'] = torch.min(activated_lr).item()
+            layer_metrics['state_lr_max'] = torch.max(activated_lr).item()
+            layer_metrics['state_lr_std'] = torch.std(activated_lr).item()
+        
+        return s, layer_metrics
+    
+    
+    def ttt_forward(self, input, target):
+        """
+        Update the latent tokens with the TTT blocks. Returns the updated state and TTT metrics for logging.
+        Args:
+            input: Input data batch
+            target: Target data batch
+            partial_encoded_latents: Latent tokens with only using the first n_encoder_inputs input views [b, n_latent_vectors, d]
+            full_encoded_latents: (Optional) Latent tokens with using all input views [b, n_latent_vectors, d]
+        Returns:
+            s: Updated latent tokens [b, n_latent_vectors, d]
+            ttt_metrics: TTT metrics
+        """
+        # Disable gradient checkpointing during TTT to avoid double differentiation
+        self._in_ttt_mode = True
+
+        partial_encoded_latents, full_encoded_latents = self.encode(input)
+        s = partial_encoded_latents
+        if self.config.model.ttt.detach_s0:
+            # If detach s0, the gradient will not flow into encoder, tokenizer and the register_token.
+            # We need to detach s but then make it require grad again for autograd.grad to work
+            s = s.detach().requires_grad_(True)
+
+        # iterate over layers and iterations
+        input_pose_tokens = None
+        target_pose_tokens = None
+        ttt_metrics = {'layers': []}
+        losses = []
+        for layer_idx in range(self.config.model.ttt.n_layer):
+            for iter_idx in range(self.config.model.ttt.n_iters_per_layer):
+                idx = layer_idx * self.config.model.ttt.n_iters_per_layer + iter_idx
+                
+                # Compute self-supervision losses
+                decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, loss_metrics, input_pose_tokens, target_pose_tokens, _, _ = self._compute_ttt_loss(
+                    s, input, target, full_encoded_latents, input_pose_tokens, target_pose_tokens
+                )
+
+                if self.config.model.ttt.supervise_mode == "average":
+                    if self.config.training.supervision == "input":
+                        loss = input_loss_metrics["loss"]
+                    elif self.config.training.supervision == "target":
+                        loss = target_loss_metrics["loss"]
+                    if self.config.model.ttt.distill_factor > 0.0:
+                        loss += distillation_loss * self.config.model.ttt.distill_factor
+                    losses.append(loss)
+                
+                # Update state with self-supervision losses
+                grad_norm = self.ttt_grad_normalizers[layer_idx]
+                state_norm = self.ttt_state_normalizers[layer_idx]
+                opt = self.ttt_blocks[layer_idx]
+                learnable_state_lr = None
+                if self.ttt_learnable_state_lr is not None:
+                    learnable_state_lr = self.ttt_learnable_state_lr[layer_idx]
+                    
+                s, update_metrics = self._update_state_with_loss(s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], learnable_state_lr)
+                
+                # Merge metrics
+                layer_metrics = {**loss_metrics, **update_metrics}
+                ttt_metrics['layers'].append(layer_metrics)
+
+        # Compute last layer losses
+        decoder_input, last_input_loss_metrics, last_target_loss_metrics, last_distillation_loss, last_layer_metrics, _, _, _, rendered_target = self._compute_ttt_loss(
+            s, input, target, full_encoded_latents, 
+            input_pose_tokens=None, 
+            target_pose_tokens=target_pose_tokens, 
+            compute_target_loss=True,
+        )
+
+        if self.config.training.supervision == "input":
+            loss = last_input_loss_metrics["loss"]
+        elif self.config.training.supervision == "target":
+            loss = last_target_loss_metrics["loss"]
+        if self.config.model.ttt.distill_factor > 0.0:
+            loss += last_distillation_loss * self.config.model.ttt.distill_factor
+        losses.append(loss)
+
+        # TODO: hacky replacing
+        # Render full input images, only for visualization
+        rendered_input, _ = self.decode(input, decoder_input)
+
+        ttt_metrics["last_input_loss"] = last_layer_metrics["input_loss"]
+        ttt_metrics["last_target_loss"] = last_layer_metrics["target_loss"]
+        if self.config.model.ttt.distill_factor > 0.0:
+            ttt_metrics["last_distillation_loss"] = last_layer_metrics["distillation_loss"]
+
+        loss = sum(losses) / len(losses)
+        ttt_metrics["loss"] = loss.item()
+
+        # Re-enable gradient checkpointing after TTT
+        self._in_ttt_mode = False
+
+        return input, target, last_input_loss_metrics, last_target_loss_metrics, last_distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
+
+    
+    def ttt_forward_g3r(self, input, target, layer_idx, iter_idx, s=None, full_encoded_latents=None, input_pose_tokens=None, target_pose_tokens=None, update=True):
+        """
+        Forward the latent tokens with the TTT blocks for G3R supervision. Returns the updated state and TTT metrics for logging.
+        Args:
+            input: Input data batch
+            target: Target data batch
+            layer_idx: Layer index
+            iter_idx: Iteration index
+            s: (Optional) Current state tensor [b, n_latent_vectors, d]
+            full_encoded_latents: (Optional) Latent tokens with using all input views [b, n_latent_vectors, d]
+            input_pose_tokens: (Optional) Cached pose tokens for input views
+            target_pose_tokens: (Optional) Cached pose tokens for target views
+            update: Whether to update the state
+        Returns:
+            s: Updated latent tokens [b, n_latent_vectors, d]
+        """
+        assert layer_idx is not None and iter_idx is not None, "layer_idx and iter_idx must be provided for G3R supervision"
+        idx = layer_idx * self.config.model.ttt.n_iters_per_layer + iter_idx
+
+        # Disable gradient checkpointing during TTT to avoid double differentiation
+        self._in_ttt_mode = True
+
+        if s is None:
+            assert layer_idx == 0 and iter_idx == 0, "layer_idx and iter_idx must be 0 for G3R supervision when s is not provided"
+            partial_encoded_latents, full_encoded_latents = self.encode(input)
+            s = partial_encoded_latents
+        
+        if self.config.model.ttt.detach_s0:
+            # If detach s0, the gradient will not flow into encoder, tokenizer and the register_token.
+            # We need to detach s but then make it require grad again for autograd.grad to work
+            s = s.detach().requires_grad_(True)
+
+        # Compute self-supervision losses
+        decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, loss_metrics, input_pose_tokens, target_pose_tokens, rendered_input, rendered_target = self._compute_ttt_loss(
+            s, input, target, full_encoded_latents, input_pose_tokens, target_pose_tokens
         )
         
-        return result
+        # Update state with self-supervision losses if update is True
+        layer_metrics = loss_metrics
+        if update:
+            grad_norm = self.ttt_grad_normalizers[layer_idx]
+            state_norm = self.ttt_state_normalizers[layer_idx]
+            opt = self.ttt_blocks[layer_idx]
+            learnable_state_lr = None
+            if self.ttt_learnable_state_lr is not None:
+                learnable_state_lr = self.ttt_learnable_state_lr[layer_idx]
+
+            s, update_metrics = self._update_state_with_loss(s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], learnable_state_lr)
+            layer_metrics = {**loss_metrics, **update_metrics}
+        else:
+            # TODO: hacky replacing
+            rendered_input, _ = self.decode(input, decoder_input)
+
+        if self.config.training.supervision == "input":
+            loss = input_loss_metrics["loss"]
+        elif self.config.training.supervision == "target":
+            loss = target_loss_metrics["loss"]
+        if self.config.model.ttt.distill_factor > 0.0:
+            loss += distillation_loss * self.config.model.ttt.distill_factor
+
+        # Re-enable gradient checkpointing after TTT
+        self._in_ttt_mode = False
+
+        return input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics
+    
+    
+    def forward(self, data_batch, has_target_image=True, layer_idx=None, iter_idx=None, **kwargs):
+        assert has_target_image, "JC: we might need to support this?"
+        if kwargs.get("input") is None or kwargs.get("target") is None:
+            if "input" in kwargs:
+                kwargs.pop("input")
+            if "target" in kwargs:
+                kwargs.pop("target")
+            input, target = self.process_data(data_batch, has_target_image=has_target_image, target_has_input = self.config.training.target_has_input, compute_rays=True)
+        else:
+            input, target = kwargs.pop("input"), kwargs.pop("target")
+        
+        if self.config.model.ttt.supervise_mode == "g3r":
+            assert layer_idx is not None and iter_idx is not None, "layer_idx and iter_idx must be provided for G3R supervision"
+            return self.ttt_forward_g3r(input, target, layer_idx, iter_idx, **kwargs)
+        else:    
+            return self.ttt_forward(input, target)
 
 
     @torch.no_grad()

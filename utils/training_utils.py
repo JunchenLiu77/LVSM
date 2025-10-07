@@ -58,6 +58,7 @@ def format_number(num):
         return f"{num / 1_000:.2f}K"
     return str(num)
 
+
 def create_optimizer(model, weight_decay, learning_rate, betas, is_ttt=False, freeze_encoder=False, freeze_decoder=False, freeze_tokenizer=False, freeze_latent=False):
     # if is_ttt, then 'freeze' parameters determine whether to freeze the encoder and decoder parameters.
     # start with all of the candidate parameters
