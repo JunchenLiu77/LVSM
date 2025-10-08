@@ -159,7 +159,24 @@ class Dataset(Dataset):
 
         if self.inference and scene_name in self.view_idx_list:
             current_view_idx = self.view_idx_list[scene_name]
-            image_indices= current_view_idx["context"] + current_view_idx["target"]
+            assert self.config.training.num_input_views >= len(current_view_idx["context"]), f"We have {len(current_view_idx["context"])} context views, but we want to select {self.config.training.num_input_views} input views."
+            assert self.config.training.num_target_views == len(current_view_idx["target"]), f"For now we expect the number of target views to be the same as the number of target views in the index file."
+            context_indices = current_view_idx["context"]
+            target_indices = current_view_idx["target"]
+            
+            if self.config.training.num_input_views > len(current_view_idx["context"]):
+                # randomly sample extra input views in between context views
+                n_extra_input_views = self.config.training.num_input_views - len(context_indices)
+                candidates = list(range(len(frames)))
+                candidates = [i for i in candidates if i not in context_indices and i not in target_indices and i > context_indices[0] and i < context_indices[-1]]
+                if len(candidates) < n_extra_input_views:
+                    # select all candidates and then randomly sample
+                    selected = candidates * (n_extra_input_views // len(candidates)) + random.sample(candidates, n_extra_input_views % len(candidates))
+                else:
+                    selected = random.sample(candidates, n_extra_input_views)
+                context_indices = context_indices + sorted(selected)
+            
+            image_indices= context_indices + target_indices
         else:
             # sample input and target views
             image_indices = self.view_selector(frames)
