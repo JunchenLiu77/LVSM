@@ -371,7 +371,3 @@ def summarize_evaluation(evaluation_folder):
     
     print(f"Summary written to {csv_file}")
     print(f"Average: {','.join(averages)}")
-
-    # export average metrics to a text file
-    with open(os.path.join(evaluation_folder, "average_metrics.txt"), "w") as f:
-        f.write(f"Average: {','.join(averages)}\n")

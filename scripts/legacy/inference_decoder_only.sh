@@ -69,7 +69,6 @@ srun uv run python -W ignore::FutureWarning -W ignore::UserWarning -m torch.dist
     training.checkpoint_dir="./ckpts/scene_decoder_only_256.pt" \
     training.batch_size_per_gpu=4 \
     training.target_has_input=false \
-    training.num_views=5 \
     training.square_crop=true \
     training.num_input_views=2 \
     training.num_target_views=3 \

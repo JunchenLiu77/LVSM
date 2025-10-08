@@ -103,7 +103,6 @@ srun uv run torchrun \
     training.checkpoint_dir="./experiments/checkpoints/lvsm_bf16" \
     training.batch_size_per_gpu=8 \
     training.target_has_input=false \
-    training.num_views=8 \
     training.square_crop=true \
     training.num_input_views=2 \
     training.num_target_views=6 \

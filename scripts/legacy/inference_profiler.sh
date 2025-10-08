@@ -55,7 +55,6 @@ srun --exclusive uv run python -W ignore::FutureWarning -W ignore::UserWarning -
     training.num_workers=2 \
     training.prefetch_factor=2 \
     training.target_has_input=false \
-    training.num_views=5 \
     training.square_crop=true \
     training.num_input_views=2 \
     training.num_target_views=3 \

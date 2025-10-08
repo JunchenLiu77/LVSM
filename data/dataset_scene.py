@@ -131,7 +131,7 @@ class Dataset(Dataset):
         return in_c2ws
 
     def view_selector(self, frames):
-        if len(frames) < self.config.training.num_views:
+        if len(frames) < self.config.training.num_input_views + self.config.training.num_target_views:
             return None
         # sample view candidates
         view_selector_config = self.config.training.view_selector
@@ -144,7 +144,7 @@ class Dataset(Dataset):
             return None
         start_frame = random.randint(0, len(frames) - frame_dist - 1)
         end_frame = start_frame + frame_dist
-        sampled_frames = random.sample(range(start_frame + 1, end_frame), self.config.training.num_views-2)
+        sampled_frames = random.sample(range(start_frame + 1, end_frame), self.config.training.num_input_views + self.config.training.num_target_views - 2)
         
         # JC: always use two input views, which are the first two in returned list.
         image_indices = [start_frame, end_frame] + sampled_frames

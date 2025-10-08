@@ -248,6 +248,10 @@ class Generator:
             overrides.append(f'training.num_input_views={args.num_input_views}')
         if args.num_target_views is not None:
             overrides.append(f'training.num_target_views={args.num_target_views}')
+        if args.target_has_input is not None and args.target_has_input:
+            overrides.append('training.target_has_input=true')
+        elif args.no_target_has_input is not None and args.no_target_has_input:
+            overrides.append('training.target_has_input=false')
         
         return overrides
     
@@ -508,6 +512,10 @@ def main():
                         help='Number of input views')
     parser.add_argument('--num-target-views', type=int,
                         help='Number of target views')
+    parser.add_argument('--target-has-input', action='store_true', default=None,
+                        help='Target has input views')
+    parser.add_argument('--no-target-has-input', action='store_true', default=None,
+                        help='Do not target has input views')
     
     # Inference Configuration
     parser.add_argument('--inference', action='store_true', default=None,

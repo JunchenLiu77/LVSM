@@ -117,12 +117,8 @@ class ProcessData(nn.Module):
                 for _ in range(bs)
             ], dtype=torch.long, device=data_batch["image"].device) # [b, num_target_views]
         else:
-            assert (
-                self.config.training.num_input_views + num_target_views <= self.config.training.num_views
-            ), f"We have {self.config.training.num_views} views in total, but we want to select {self.config.training.num_input_views} input views and {num_target_views} target views. This is more than the total number of views we have."
-            
             index = torch.tensor([
-                [self.config.training.num_views - 1 - j for j in range(num_target_views)]
+                [self.config.training.num_input_views + self.config.training.num_target_views - 1 - j for j in range(num_target_views)]
                 for _ in range(bs)
             ], dtype=torch.long, device=data_batch["image"].device)
             index = torch.sort(index, dim=1).values # [b, num_target_views]

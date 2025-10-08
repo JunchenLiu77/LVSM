@@ -35,7 +35,6 @@ training:
   scene_scale_factor: 1.35
   num_input_views: 2
   num_target_views: 6
-  num_views: 8
   square_crop: true
   target_has_input: true # If True, target views can be the same as input views
   view_selector:
