@@ -23,6 +23,7 @@ model:
     n_layer: 3
     n_iters_per_layer: 1
     n_blocks_per_layer: 1
+    n_blocks_per_layer_lrnet: 1
     state_lr: 1e-1
     state_lr_mode: learnable
     state_lr_init: -2.0

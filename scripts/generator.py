@@ -114,6 +114,8 @@ class Generator:
                 overrides.append(f'model.transformer.decoder_n_layer={args.decoder_layers}')
             if args.n_blocks_per_layer is not None:
                 overrides.append(f'model.ttt.n_blocks_per_layer={args.n_blocks_per_layer}')
+            if args.n_blocks_per_layer_lrnet is not None:
+                overrides.append(f'model.ttt.n_blocks_per_layer_lrnet={args.n_blocks_per_layer_lrnet}')
             if args.n_latent is not None:
                 overrides.append(f'model.transformer.n_latent_vectors={args.n_latent}')
             if args.ttt_layers is not None:
@@ -396,7 +398,7 @@ def main():
                         help='Number of TTT layers (encoder-decoder-ttt)')
     parser.add_argument('--n-iters-per-layer', type=int,
                         help='Number of TTT iterations per layer (encoder-decoder-ttt)')
-    parser.add_argument('--state-lr-mode', choices=['fixed', 'learnable'],
+    parser.add_argument('--state-lr-mode', choices=['fixed', 'learnable', 'adaptive', 'adaptive_mlp'],
                         help='State learning rate mode (encoder-decoder-ttt)')
     parser.add_argument('--state-lr-init', type=float,
                         help='Initial value for learnable state_lr (pre-sigmoid), only used when state_lr_mode is "learnable"')
@@ -410,6 +412,8 @@ def main():
                         help='Disable residual connection in TTT (encoder-decoder-ttt)')
     parser.add_argument('--n-blocks-per-layer', type=int,
                         help='Number of blocks per layer (encoder-decoder-ttt)')
+    parser.add_argument('--n-blocks-per-layer-lrnet', type=int,
+                        help='Number of blocks per layer for lrnet (encoder-decoder-ttt)')
     parser.add_argument('--mlp-dim', type=int,
                         help='TTT MLP dimension (encoder-decoder-ttt)')
     parser.add_argument('--use-positional-encoding', action='store_true', default=None,

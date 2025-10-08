@@ -47,10 +47,14 @@ class Images2LatentScene(nn.Module):
         }
         
         # Add learnable state_lr parameters to the count if they exist
-        if hasattr(self, 'ttt_learnable_state_lr') and self.ttt_learnable_state_lr is not None:
-            for lr_param in self.ttt_learnable_state_lr:
+        if self.config.model.ttt.state_lr_mode == "learnable":
+            for lr_param in self.ttt_lrnet:
                 self.ttt_param_counts['total_ttt_params'] += lr_param.numel()
                 self.ttt_param_counts['trainable_ttt_params'] += lr_param.numel() if lr_param.requires_grad else 0
+        elif self.config.model.ttt.state_lr_mode == "adaptive" or self.config.model.ttt.state_lr_mode == "adaptive_mlp":
+            for lrnet in self.ttt_lrnet:
+                self.ttt_param_counts['total_ttt_params'] += sum(p.numel() for p in lrnet.parameters())
+                self.ttt_param_counts['trainable_ttt_params'] += sum(p.numel() for p in lrnet.parameters() if p.requires_grad)
         
         for i, block in enumerate(self.ttt_blocks) if self.ttt_blocks is not None else []:
             block_params = sum(p.numel() for p in block.parameters())
@@ -168,22 +172,61 @@ class Images2LatentScene(nn.Module):
     def _init_ttt(self):
         # Initialize state learning rate based on configuration
         state_lr_mode = self.config.model.ttt.state_lr_mode
-        
         if state_lr_mode == 'learnable':
             # Initialize learnable state_lr parameters for each TTT layer
-            self.ttt_learnable_state_lr = nn.ParameterList()
+            self.ttt_lrnet = nn.ParameterList()
             init_value = self.config.model.ttt.state_lr_init
             
             for _ in range(self.config.model.ttt.n_layer):
                 # Create a learnable gating vector with shape [D]
                 lr_param = nn.Parameter(torch.full((self.config.model.transformer.d,), init_value))
-                self.ttt_learnable_state_lr.append(lr_param)
+                self.ttt_lrnet.append(lr_param)
             
             print(f"Initialized learnable state_lr with init_value={init_value}")
-        else:
+        elif state_lr_mode == "fixed":
             # Use fixed state_lr from config
-            self.ttt_learnable_state_lr = None
             print(f"Using fixed state_lr={self.config.model.ttt.state_lr}")
+        elif state_lr_mode == "adaptive":
+            # Use adaptive state_lr which take in the magnitude of gradient [B, L, D] and produce the state_lr [B, L, D]
+            self.ttt_lrnet = nn.ModuleList()
+            for _ in range(self.config.model.ttt.n_layer):
+                # Build the transformer block(s) and sigmoid
+                lrnet = nn.Sequential(
+                    # Normalization helps with performance a little bit
+                    nn.LayerNorm(self.config.model.transformer.d, bias=False) if self.config.model.ttt.normalizer_type == "layer_norm" else nn.RMSNorm(self.config.model.transformer.d),
+                    *[QK_Norm_TransformerBlock(
+                        self.config.model.transformer.d,
+                        self.config.model.transformer.d_head,
+                        use_qk_norm=True,
+                        use_positional_encoding=self.config.model.ttt.use_positional_encoding
+                    ) for _ in range(self.config.model.ttt.n_blocks_per_layer_lrnet)],
+                    # Activation doesn't help here.
+                    # nn.ReLU(),
+                    # nn.Sigmoid()
+                    # nn.Tanh()
+                )
+                # Initialize all weights and biases in the transformer blocks to output near zero
+                lrnet.apply(init_weights)
+                self.ttt_lrnet.append(lrnet)
+            print(f"Using adaptive state_lr with {self.config.model.ttt.n_blocks_per_layer_lrnet} blocks per layer")
+        elif state_lr_mode == "adaptive_mlp":
+            # Similar to adaptive, but use a MLP to compute the state_lr
+            self.ttt_lrnet = nn.ModuleList()
+            for _ in range(self.config.model.ttt.n_layer):
+                lrnet = nn.Sequential(
+                    # Normalization helps with performance a little bit
+                    nn.LayerNorm(self.config.model.transformer.d, bias=False) if self.config.model.ttt.normalizer_type == "layer_norm" else nn.RMSNorm(self.config.model.transformer.d),
+                    nn.Linear(self.config.model.transformer.d, self.config.model.transformer.d * 4, bias=False),
+                    nn.GELU(),
+                    nn.Linear(self.config.model.transformer.d * 4, self.config.model.transformer.d, bias=False),
+                    # Activation doesn't help here.
+                    # nn.ReLU(),
+                    # nn.Sigmoid()
+                    # nn.Tanh()
+                )
+                lrnet.apply(init_weights)
+                self.ttt_lrnet.append(lrnet)
+            print(f"Using adaptive_mlp state_lr with 2 layers per layer")
         
         # Initialize LayerNorm modules for gradient and state normalization.
         if self.config.model.ttt.normalizer_type == "layer_norm":
@@ -517,7 +560,7 @@ class Images2LatentScene(nn.Module):
         return decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, layer_metrics, input_pose_tokens, target_pose_tokens, rendered_input, rendered_target
     
 
-    def _update_state_with_loss(self, s, decoder_input, grad_norm, state_norm, opt, input_loss, learnable_state_lr=None):
+    def _update_state_with_loss(self, s, decoder_input, grad_norm, state_norm, opt, input_loss, lrnet=None):
         """
         Update state using the computed loss.
         
@@ -528,7 +571,7 @@ class Images2LatentScene(nn.Module):
             state_norm: State normalizer
             opt: Optimizer
             input_loss: Computed input loss
-            learnable_state_lr: (Optional) Learnable state learning rate
+            lrnet: (Optional) Learnable state learning rate
         Returns:
             Tuple of (updated_s, layer_metrics)
         """
@@ -552,23 +595,23 @@ class Images2LatentScene(nn.Module):
         layer_metrics["orig_grad_std"] = torch.std(grad_s).item()
 
         # normalize gradient after detach. otherwise the normalizer will get no gradients.
-        grad_s = grad_s / (grad_s.std(dim=(-1), keepdim=True) + 1e-10) # [b, n_latent_vectors, d]
-        grad_s = grad_norm(grad_s) # [b, n_latent_vectors, d]
+        grad_s_normed = grad_s / (grad_s.std(dim=(-1), keepdim=True) + 1e-10) # [b, n_latent_vectors, d]
+        grad_s_normed = grad_norm(grad_s_normed) # [b, n_latent_vectors, d]
 
         # log the scale factor of the normalizer
         if (isinstance(grad_norm, nn.RMSNorm) or isinstance(grad_norm, nn.LayerNorm)) and grad_norm.elementwise_affine:
             layer_metrics["grad_norm_scaler"] = grad_norm.weight.mean().item()
 
         # log gradient statistics
-        layer_metrics["grad_max"] = torch.max(torch.abs(grad_s)).item()
-        layer_metrics["grad_mean"] = torch.mean(torch.abs(grad_s)).item()
-        layer_metrics["grad_std"] = torch.std(grad_s).item()
+        layer_metrics["grad_max"] = torch.max(torch.abs(grad_s_normed)).item()
+        layer_metrics["grad_mean"] = torch.mean(torch.abs(grad_s_normed)).item()
+        layer_metrics["grad_std"] = torch.std(grad_s_normed).item()
         
         # update state with loss
         if self.config.model.ttt.opt_model == "adam":
             # Create Adam optimizer with the current state as parameter
             state_param = nn.Parameter(s.clone().detach().requires_grad_(True))
-            state_param.grad = grad_s
+            state_param.grad = grad_s_normed
             
             # Get Adam hyperparameters
             adam_lr = self.config.model.ttt.adam.lr
@@ -591,7 +634,7 @@ class Images2LatentScene(nn.Module):
             delta_s = state_param.data - s
         else:
             if self.config.model.ttt.opt_model == "transformer3":
-                opt_input = grad_s # [b, n_latent_vectors, d]
+                opt_input = grad_s_normed # [b, n_latent_vectors, d]
             else:
                 if self.config.model.ttt.detach_opt_input:
                     # If detach opt input, the gradient will not flow into the opt input state.
@@ -611,17 +654,27 @@ class Images2LatentScene(nn.Module):
                 layer_metrics["opt_state_mean"] = torch.mean(opt_input_s).item()
                 layer_metrics["opt_state_std"] = torch.std(opt_input_s).item()
 
-                opt_input = torch.cat((opt_input_s, grad_s), dim=-1) # [b, n_latent_vectors, 2*d]
+                opt_input = torch.cat((opt_input_s, grad_s_normed), dim=-1) # [b, n_latent_vectors, 2*d]
 
             delta_s = opt(opt_input) # [b, n_latent_vectors, d]
         
         # get the effective state_lr for this layer
-        if learnable_state_lr is not None:
+        if self.config.model.ttt.state_lr_mode == "learnable":
+            assert lrnet is not None, "lrnet is required for learnable state_lr"
             # Use learnable state_lr with sigmoid activation
-            state_lr = torch.sigmoid(learnable_state_lr)  # [D]
+            state_lr = torch.sigmoid(lrnet)  # [D]
             # Expand to match delta_s shape for element-wise multiplication
             state_lr = state_lr.unsqueeze(0).unsqueeze(0)  # [1, 1, D]
             effective_lr = state_lr  # This will be broadcasted
+            
+            # For metrics, use mean of the activated lr values
+            state_lr_value = torch.mean(state_lr).item()
+        elif self.config.model.ttt.state_lr_mode in ["adaptive", "adaptive_mlp"]:
+            assert lrnet is not None, "lrnet is required for adaptive state_lr"
+            # Pass the "magnitude" of gradient to the lrnet. Since the gradient can be small, we use the log scale as the input.
+            log_abs_grad_s = torch.log(torch.abs(grad_s) + 1e-10)
+            state_lr = lrnet(log_abs_grad_s) # [b, n_latent_vectors, d]
+            effective_lr = state_lr
             
             # For metrics, use mean of the activated lr values
             state_lr_value = torch.mean(state_lr).item()
@@ -647,8 +700,8 @@ class Images2LatentScene(nn.Module):
         layer_metrics["state_std"] = torch.std(s).item()
         
         # log learnable lr statistics if applicable
-        if self.ttt_learnable_state_lr is not None:
-            activated_lr = torch.sigmoid(learnable_state_lr)
+        if self.config.model.ttt.state_lr_mode == "learnable":
+            activated_lr = torch.sigmoid(lrnet)
             layer_metrics['state_lr_min'] = torch.min(activated_lr).item()
             layer_metrics['state_lr_max'] = torch.max(activated_lr).item()
             layer_metrics['state_lr_std'] = torch.std(activated_lr).item()
@@ -705,11 +758,11 @@ class Images2LatentScene(nn.Module):
                 grad_norm = self.ttt_grad_normalizers[layer_idx]
                 state_norm = self.ttt_state_normalizers[layer_idx]
                 opt = self.ttt_blocks[layer_idx]
-                learnable_state_lr = None
-                if self.ttt_learnable_state_lr is not None:
-                    learnable_state_lr = self.ttt_learnable_state_lr[layer_idx]
-                    
-                s, update_metrics = self._update_state_with_loss(s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], learnable_state_lr)
+                lrnet = None
+                if self.config.model.ttt.state_lr_mode in ["learnable", "adaptive", "adaptive_mlp"]:
+                    lrnet = self.ttt_lrnet[layer_idx]
+                
+                s, update_metrics = self._update_state_with_loss(s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], lrnet)
                 
                 # Merge metrics
                 layer_metrics = {**loss_metrics, **update_metrics}
@@ -792,11 +845,11 @@ class Images2LatentScene(nn.Module):
             grad_norm = self.ttt_grad_normalizers[layer_idx]
             state_norm = self.ttt_state_normalizers[layer_idx]
             opt = self.ttt_blocks[layer_idx]
-            learnable_state_lr = None
-            if self.ttt_learnable_state_lr is not None:
-                learnable_state_lr = self.ttt_learnable_state_lr[layer_idx]
+            lrnet = None
+            if self.config.model.ttt.state_lr_mode == "learnable":
+                lrnet = self.ttt_lrnet[layer_idx]
 
-            s, update_metrics = self._update_state_with_loss(s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], learnable_state_lr)
+            s, update_metrics = self._update_state_with_loss(s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], lrnet)
             layer_metrics = {**loss_metrics, **update_metrics}
         else:
             # TODO: hacky replacing
