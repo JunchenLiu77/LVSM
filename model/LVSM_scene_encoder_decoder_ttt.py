@@ -665,28 +665,17 @@ class Images2LatentScene(nn.Module):
             state_lr = torch.sigmoid(lrnet)  # [D]
             # Expand to match delta_s shape for element-wise multiplication
             state_lr = state_lr.unsqueeze(0).unsqueeze(0)  # [1, 1, D]
-            effective_lr = state_lr  # This will be broadcasted
-            
-            # For metrics, use mean of the activated lr values
-            state_lr_value = torch.mean(state_lr).item()
         elif self.config.model.ttt.state_lr_mode in ["adaptive", "adaptive_mlp"]:
             assert lrnet is not None, "lrnet is required for adaptive state_lr"
             # Pass the "magnitude" of gradient to the lrnet. Since the gradient can be small, we use the log scale as the input.
             log_abs_grad_s = torch.log(torch.abs(grad_s) + 1e-10)
             state_lr = lrnet(log_abs_grad_s) # [b, n_latent_vectors, d]
-            effective_lr = state_lr
-            
-            # For metrics, use mean of the activated lr values
-            state_lr_value = torch.mean(state_lr).item()
         else:
             # Use fixed state_lr from config
-            state_lr_value = self.config.model.ttt.state_lr
-            effective_lr = state_lr_value
-
-        layer_metrics["state_lr"] = state_lr_value
+            state_lr = self.config.model.ttt.state_lr
         
         # Apply update with effective learning rate
-        s_update = delta_s * effective_lr
+        s_update = delta_s * state_lr
         
         # Apply update
         if self.config.model.ttt.is_residual:
@@ -700,11 +689,10 @@ class Images2LatentScene(nn.Module):
         layer_metrics["state_std"] = torch.std(s).item()
         
         # log learnable lr statistics if applicable
-        if self.config.model.ttt.state_lr_mode == "learnable":
-            activated_lr = torch.sigmoid(lrnet)
-            layer_metrics['state_lr_min'] = torch.min(activated_lr).item()
-            layer_metrics['state_lr_max'] = torch.max(activated_lr).item()
-            layer_metrics['state_lr_std'] = torch.std(activated_lr).item()
+        if self.config.model.ttt.state_lr_mode == "learnable" or self.config.model.ttt.state_lr_mode == "adaptive" or self.config.model.ttt.state_lr_mode == "adaptive_mlp":
+            layer_metrics["state_lr_mean"] = torch.mean(state_lr).item()
+            layer_metrics['state_lr_max'] = torch.max(state_lr).item()
+            layer_metrics['state_lr_std'] = torch.std(state_lr).item()
         
         return s, layer_metrics
     
