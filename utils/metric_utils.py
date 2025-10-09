@@ -370,4 +370,4 @@ def summarize_evaluation(evaluation_folder):
         f.write(f"average,{','.join(averages)}\n")
     
     print(f"Summary written to {csv_file}")
-    print(f"Average: {','.join(averages)}")
+    print(f"Average: {','.join(f'{float(avg):.4f}' for avg in averages)}")

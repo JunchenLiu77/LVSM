@@ -164,6 +164,10 @@ class Generator:
                 overrides.append('model.ttt.detach_residual=false')
             if args.supervise_mode is not None:
                 overrides.append(f'model.ttt.supervise_mode={args.supervise_mode}')
+            if args.min_layer is not None:
+                overrides.append(f'model.ttt.min_layer={args.min_layer}')
+            if args.max_layer is not None:
+                overrides.append(f'model.ttt.max_layer={args.max_layer}')
             if args.normalizer_type is not None:
                 overrides.append(f'model.ttt.normalizer_type={args.normalizer_type}')
             if args.normalizer_affine is not None and args.normalizer_affine:
@@ -321,6 +325,7 @@ export OMP_NUM_THREADS=4
 export IBV_FORK_SAFE=1
 export MASTER_ADDR=localhost
 export MASTER_PORT=$(shuf -i 20000-65000 -n 1)
+{'export CUBLAS_WORKSPACE_CONFIG=:4096:8' if args.inference else ''}
 
 # Optimized NCCL settings (P2P and IB enabled for L40s or A100)
 # export NCCL_IB_DISABLE=1  # Uncomment to disable InfiniBand
@@ -452,8 +457,12 @@ def main():
                         help='Adam eps (encoder-decoder-ttt)')
     parser.add_argument('--ttt-adam-weight-decay', type=float,
                         help='Adam weight decay (encoder-decoder-ttt)')
-    parser.add_argument('--supervise-mode', choices=['last', 'average', 'g3r'],
+    parser.add_argument('--supervise-mode', choices=['last', 'average', 'g3r', 'random_last'],
                         help='Supervise mode (encoder-decoder-ttt)')
+    parser.add_argument('--min-layer', type=int,
+                        help='Minimum layer for random_last supervise mode (encoder-decoder-ttt)')
+    parser.add_argument('--max-layer', type=int,
+                        help='Maximum layer for random_last supervise mode (encoder-decoder-ttt)')
     parser.add_argument('--normalizer-type', choices=['layer_norm', 'rms_norm'],
                         help='Normalizer type (encoder-decoder-ttt)')
     parser.add_argument('--normalizer-affine', action='store_true', default=None,

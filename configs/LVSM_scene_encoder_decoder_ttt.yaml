@@ -38,6 +38,8 @@ model:
     detach_opt_input: false
     detach_residual: false
     supervise_mode: last
+    min_layer: 3 # this is only used for random_last supervise mode
+    max_layer: 6 # this is only used for random_last supervise mode
     distill_factor: 0.0
     normalizer_type: layer_norm
     normalizer_affine: true

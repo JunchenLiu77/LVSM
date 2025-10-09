@@ -63,7 +63,7 @@ def init_config():
 
 
 
-def init_distributed(seed=42):
+def init_distributed(seed=42, deterministic=False):
     """
     Initialize distributed training environment and set random seeds for reproducibility.
     
@@ -102,7 +102,12 @@ def init_distributed(seed=42):
     random.seed(process_seed)
     
     # Optional: For better performance
-    torch.backends.cudnn.benchmark = True
+    # we use different compute graph each iteration so enabling this doesn't help with performance.
+    # torch.backends.cudnn.benchmark = True 
+    if deterministic:
+        # you might need to set other flags like CUBLAS_WORKSPACE_CONFIG=:4096:8 to enable this, see: https://docs.nvidia.com/cuda/cublas/index.html#results-reproducibility
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.deterministic = True
     
     return edict({
         'local_rank': local_rank,

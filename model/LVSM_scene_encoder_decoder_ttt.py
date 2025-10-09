@@ -5,6 +5,7 @@ import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import random
 from easydict import EasyDict as edict
 from einops.layers.torch import Rearrange
 from einops import rearrange, repeat
@@ -205,7 +206,6 @@ class Images2LatentScene(nn.Module):
                     # nn.Sigmoid()
                     # nn.Tanh()
                 )
-                # Initialize all weights and biases in the transformer blocks to output near zero
                 lrnet.apply(init_weights)
                 self.ttt_lrnet.append(lrnet)
             print(f"Using adaptive state_lr with {self.config.model.ttt.n_blocks_per_layer_lrnet} blocks per layer")
@@ -737,9 +737,13 @@ class Images2LatentScene(nn.Module):
         ttt_metrics = {'layers': []}
         losses = []
         for layer_idx in range(self.config.model.ttt.n_layer):
-            for iter_idx in range(self.config.model.ttt.n_iters_per_layer):
-                idx = layer_idx * self.config.model.ttt.n_iters_per_layer + iter_idx
-                
+            if self.config.model.ttt.supervise_mode == "random_last":
+                # if random_last, we randomly choose the number of iterations between [min_layer, max_layer]
+                iter_range = range(random.randint(self.config.model.ttt.min_layer, self.config.model.ttt.max_layer))
+            else:
+                iter_range = range(self.config.model.ttt.n_iters_per_layer)
+            
+            for iter_idx in iter_range:
                 # Compute self-supervision losses
                 decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, loss_metrics, input_pose_tokens, target_pose_tokens, _, _ = self._compute_ttt_loss(
                     s, input, target, full_encoded_latents, input_pose_tokens, target_pose_tokens
@@ -819,7 +823,6 @@ class Images2LatentScene(nn.Module):
             s: Updated latent tokens [b, n_latent_vectors, d]
         """
         assert layer_idx is not None and iter_idx is not None, "layer_idx and iter_idx must be provided for G3R supervision"
-        idx = layer_idx * self.config.model.ttt.n_iters_per_layer + iter_idx
 
         # Disable gradient checkpointing during TTT to avoid double differentiation
         self._in_ttt_mode = True
@@ -1054,5 +1057,6 @@ class Images2LatentScene(nn.Module):
             print(f"Failed to load {ckpt_paths[-1]}")
             return None
         
-        self.load_state_dict(checkpoint["model"], strict=False)
+        status = self.load_state_dict(checkpoint["model"], strict=False)
+        print(f"Loaded model from {ckpt_paths[-1]}, the status is {status}")
         return 0
