@@ -90,6 +90,7 @@ optimizer, optimized_param_dict, all_param_dict = create_optimizer(
     model,
     config.training.weight_decay,
     config.training.lr,
+    config.training.lr_ttt,
     (config.training.beta1, config.training.beta2),
     is_ttt=is_ttt,
     freeze_encoder=config.training.get("freeze_encoder", False),

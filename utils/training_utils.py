@@ -59,7 +59,7 @@ def format_number(num):
     return str(num)
 
 
-def create_optimizer(model, weight_decay, learning_rate, betas, is_ttt=False, freeze_encoder=False, freeze_decoder=False, freeze_tokenizer=False, freeze_latent=False):
+def create_optimizer(model, weight_decay, learning_rate, learning_rate_ttt, betas, is_ttt=False, freeze_encoder=False, freeze_decoder=False, freeze_tokenizer=False, freeze_latent=False):
     # if is_ttt, then 'freeze' parameters determine whether to freeze the encoder and decoder parameters.
     # start with all of the candidate parameters
     all_param_dict = {name: param for name, param in model.named_parameters()}
@@ -82,17 +82,27 @@ def create_optimizer(model, weight_decay, learning_rate, betas, is_ttt=False, fr
         optimized_param_dict = {name: param for name, param in all_param_dict.items() if param.requires_grad and ("light_field_latent" not in name or not freeze_latent)}
 
     decay_params, nodecay_params = [], []
+    decay_params_ttt, nodecay_params_ttt = [], []
     for name, param in optimized_param_dict.items():
         if param.dim() == 1 or getattr(param, '_no_weight_decay', False):
-            nodecay_params.append(param)
+            if "ttt" in name:
+                nodecay_params_ttt.append(param)
+            else:
+                nodecay_params.append(param)
         else:
-            decay_params.append(param)
+            if "ttt" in name:
+                decay_params_ttt.append(param)
+            else:
+                decay_params.append(param)
+    
     optim_groups = [
-        {'params': decay_params, 'weight_decay': weight_decay},
-        {'params': nodecay_params, 'weight_decay': 0.0}
+        {'params': decay_params, 'weight_decay': weight_decay, 'lr': learning_rate},
+        {'params': decay_params_ttt, 'weight_decay': weight_decay, 'lr': learning_rate_ttt},
+        {'params': nodecay_params, 'weight_decay': 0.0, 'lr': learning_rate},
+        {'params': nodecay_params_ttt, 'weight_decay': 0.0, 'lr': learning_rate_ttt}
     ]
     # use fused AdamW optimizer by default. 
-    optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas,fused=True)
+    optimizer = torch.optim.AdamW(optim_groups, betas=betas,fused=True)
     
     # Print Model Information
     if dist.get_rank() == 0:
@@ -103,7 +113,7 @@ def create_optimizer(model, weight_decay, learning_rate, betas, is_ttt=False, fr
             elif len(parts) > 1 and parts[0] == 'module':
                 return parts[1]
             return parts[0]  # Fallback to first part if no 'module.' prefix
-        print(f'Optimizer: AdamW, learning rate: {learning_rate}, weight decay: {weight_decay}, betas: {betas}')
+        print(f'Optimizer: AdamW, learning rate: {learning_rate}, learning rate_ttt: {learning_rate_ttt}, weight decay: {weight_decay}, betas: {betas}')
         # Number of parameters
         total_params = sum(p.numel() for p in model.parameters())
         trainable_params = sum(p.numel() for p in optimized_param_dict.values())

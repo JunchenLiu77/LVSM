@@ -193,7 +193,9 @@ class Generator:
         
         if args.lr is not None:
             overrides.append(f'training.lr={args.lr}')
-            
+        if args.lr_ttt is not None:
+            overrides.append(f'training.lr_ttt={args.lr_ttt}')
+        
         if args.warmup is not None:
             overrides.append(f'training.warmup={args.warmup}')
         
@@ -485,6 +487,8 @@ def main():
                         help='Supervision type')
     parser.add_argument('--lr', type=float,
                         help='Learning rate')
+    parser.add_argument('--lr-ttt', type=float,
+                        help='TTT learning rate')
     parser.add_argument('--warmup', type=int,
                         help='Warmup steps')
     parser.add_argument('--resume-ckpt', type=str,

@@ -471,35 +471,55 @@ class Images2LatentScene(nn.Module):
             v_target = last_n
         
         if target_pose_tokens is None:
-            target_pose_cond= self.get_posed_input(ray_o=target.ray_o, ray_d=target.ray_d) # [b, v_target, c, h, w]
+            target_pose_cond = self.get_posed_input(ray_o=target.ray_o, ray_d=target.ray_d)  # [b, v_target, c, h, w]
             target_pose_cond = target_pose_cond[:, -v_target:, ...]
-            target_pose_tokens = self.target_pose_tokenizer(target_pose_cond) # [b*v_target, n_patches, d]
-        
+            target_pose_tokens = self.target_pose_tokenizer(target_pose_cond)  # [b*v_target, n_patches, d]
+
         _, n_patches, d = target_pose_tokens.size()
-        repeated_latent_tokens = repeat(latent_tokens, 'b nl d -> (b v_target) nl d', v_target=v_target) 
-        decoder_input_tokens = torch.cat((target_pose_tokens, repeated_latent_tokens), dim=1) # [b*v_target, n_latent_vectors + n_patches, d]
-        decoder_input_tokens = self.transformer_input_layernorm_decoder(decoder_input_tokens)
-        transformer_output_tokens = self.pass_layers(self.transformer_decoder, decoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint and not self._in_ttt_mode, checkpoint_every=checkpoint_every)
-
-        # Discard the latent tokens
-        target_image_tokens, _ = transformer_output_tokens.split(
-            [n_patches, n_latent_vectors], dim=1
-        ) # [b*v_target, n_patches, d], [b*v_target, n_latent_vectors, d]
-
-        # [b*v_target, n_patches, p*p*3]
-        rendered_images = self.image_token_decoder(target_image_tokens)
         height, width = target.image_h_w
         patch_size = self.config.model.target_pose_tokenizer.patch_size
-        rendered_images = rearrange(
-            rendered_images,
-            "(b v) (h w) (p1 p2 c) -> b v c (h p1) (w p2)",
-            v=v_target,
-            h=height // patch_size, 
-            w=width // patch_size, 
-            p1=patch_size, 
-            p2=patch_size, 
-            c=3
-        )
+
+        # Chunked VRAM-saving decoding
+        chunk_size = getattr(self.config.model.ttt, 'decode_chunk_size', None)
+        if chunk_size is None or chunk_size > v_target or chunk_size <= 0:
+            chunk_size = v_target
+
+        rendered_chunks = []
+        for start in range(0, v_target, chunk_size):
+            # print(f"Decoding chunk {start} to {start + chunk_size} of {v_target}")
+            end = min(start + chunk_size, v_target)
+            this_v = end - start
+
+            # Per-chunk pose tokens
+            this_target_pose_tokens = target_pose_tokens[b*start:b*end, :, :].contiguous() # [b*this_v, n_patches, d]
+            this_latent_tokens = repeat(latent_tokens, 'b nl d -> (b v) nl d', v=this_v)
+
+            decoder_input_tokens = torch.cat((this_target_pose_tokens, this_latent_tokens), dim=1)  # [b*this_v, n_latent_vectors + n_patches, d]
+            decoder_input_tokens = self.transformer_input_layernorm_decoder(decoder_input_tokens)
+            transformer_output_tokens = self.pass_layers(
+                self.transformer_decoder,
+                decoder_input_tokens,
+                gradient_checkpoint=self.config.training.grad_checkpoint and not self._in_ttt_mode,
+                checkpoint_every=checkpoint_every
+            )
+
+            # Discard the latent tokens
+            target_image_tokens, _ = transformer_output_tokens.split([n_patches, n_latent_vectors], dim=1)  # [b*this_v, n_patches, d]
+
+            rendered_images = self.image_token_decoder(target_image_tokens) # [b*this_v, n_patches, p*p*3]
+            rendered_images = rearrange(
+                rendered_images,
+                "(b v) (h w) (p1 p2 c) -> b v c (h p1) (w p2)",
+                v=this_v,
+                h=height // patch_size,
+                w=width // patch_size,
+                p1=patch_size,
+                p2=patch_size,
+                c=3
+            )
+            rendered_chunks.append(rendered_images)
+
+        rendered_images = torch.cat(rendered_chunks, dim=1)  # [b, v_target, c, H, W]
         return rendered_images, target_pose_tokens
     
     def _compute_ttt_loss(self, s, input, target, full_encoded_latents=None, input_pose_tokens=None, target_pose_tokens=None, compute_target_loss=False):

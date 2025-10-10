@@ -153,6 +153,8 @@ with torch.autocast(
             raise NotImplementedError("Need some closer look here.")
             result= model.module.render_video(result, **config.inference.render_video_config)
         export_results(input, target, rendered_input, rendered_target, config.training.checkpoint_dir, compute_metrics=config.inference.get("compute_metrics"))
+        del input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
+        torch.cuda.empty_cache()
     torch.cuda.empty_cache()
 
 
