@@ -82,7 +82,7 @@ if config.inference.get("first_n_batches", None) is not None:
     print(f"Running first {config.inference.get('first_n_batches', None)} batches")
 
 # TTT need calculate gradient
-with torch.autocast(
+with torch.no_grad(), torch.autocast(
     enabled=config.training.use_amp,
     device_type="cuda",
     dtype=amp_dtype_mapping[config.training.amp_dtype],
@@ -107,55 +107,50 @@ with torch.autocast(
             ttt_metrics = {"layers": []}
         
         for idx in range(n_iters):
-            with torch.autocast(
-                enabled=config.training.use_amp,
-                device_type="cuda",
-                dtype=amp_dtype_mapping[config.training.amp_dtype],
-            ):
-                if is_ttt and config.model.ttt.supervise_mode == "g3r":
-                    is_last = (idx == n_iters - 1)
-                    layer_idx = idx // config.model.ttt.n_iters_per_layer
-                    iter_idx = idx % config.model.ttt.n_iters_per_layer
-                    # TODO: kinda hacky here
-                    if is_last:
-                        layer_idx = config.model.ttt.n_layer - 1
-                        iter_idx = config.model.ttt.n_iters_per_layer - 1
-                    
-                    input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics = model(
-                        batch,
-                        has_target_image=True,
-                        layer_idx=layer_idx,
-                        iter_idx=iter_idx,
-                        input=input,
-                        target=target,
-                        s=s,
-                        full_encoded_latents=full_encoded_latents,
-                        input_pose_tokens=input_pose_tokens,
-                        target_pose_tokens=target_pose_tokens,
-                        update=not is_last
-                    )
-                    s = s.detach().requires_grad_(True)
-                    full_encoded_latents = full_encoded_latents.detach() if full_encoded_latents is not None else None
-                    input_pose_tokens = input_pose_tokens.detach()
-                    target_pose_tokens = target_pose_tokens.detach()
-                    
-                    if not is_last:
-                        ttt_metrics['layers'].append(layer_metrics)
-                    else:
-                        last_layer_metrics = layer_metrics
-                        ttt_metrics["last_input_loss"] = last_layer_metrics["input_loss"]
-                        ttt_metrics["last_target_loss"] = last_layer_metrics["target_loss"]
-                        if config.model.ttt.distill_factor > 0.0:
-                            ttt_metrics["last_distillation_loss"] = last_layer_metrics["distillation_loss"]
+            if is_ttt and config.model.ttt.supervise_mode == "g3r":
+                is_last = (idx == n_iters - 1)
+                layer_idx = idx // config.model.ttt.n_iters_per_layer
+                iter_idx = idx % config.model.ttt.n_iters_per_layer
+                # TODO: kinda hacky here
+                if is_last:
+                    layer_idx = config.model.ttt.n_layer - 1
+                    iter_idx = config.model.ttt.n_iters_per_layer - 1
+                
+                input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics = model(
+                    batch,
+                    has_target_image=True,
+                    layer_idx=layer_idx,
+                    iter_idx=iter_idx,
+                    input=input,
+                    target=target,
+                    s=s,
+                    full_encoded_latents=full_encoded_latents,
+                    input_pose_tokens=input_pose_tokens,
+                    target_pose_tokens=target_pose_tokens,
+                    update=not is_last
+                )
+                
+                s = s.detach().requires_grad_(True)
+                full_encoded_latents = full_encoded_latents.detach() if full_encoded_latents is not None else None
+                input_pose_tokens = input_pose_tokens.detach()
+                target_pose_tokens = target_pose_tokens.detach()
+                
+                if not is_last:
+                    ttt_metrics['layers'].append(layer_metrics)
                 else:
-                    input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(batch)
+                    last_layer_metrics = layer_metrics
+                    ttt_metrics["last_input_loss"] = last_layer_metrics["input_loss"]
+                    ttt_metrics["last_target_loss"] = last_layer_metrics["target_loss"]
+                    if config.model.ttt.distill_factor > 0.0:
+                        ttt_metrics["last_distillation_loss"] = last_layer_metrics["distillation_loss"]
+            else:
+                input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(batch)
         if config.inference.get("render_video", False):
             raise NotImplementedError("Need some closer look here.")
             result= model.module.render_video(result, **config.inference.render_video_config)
         export_results(input, target, rendered_input, rendered_target, config.training.checkpoint_dir, compute_metrics=config.inference.get("compute_metrics"))
         del input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
         torch.cuda.empty_cache()
-    torch.cuda.empty_cache()
 
 
 dist.barrier()

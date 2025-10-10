@@ -731,7 +731,7 @@ class Images2LatentScene(nn.Module):
         if self.config.model.ttt.detach_s0:
             # If detach s0, the gradient will not flow into encoder, tokenizer and the register_token.
             # We need to detach s but then make it require grad again for autograd.grad to work
-            s = s.detach().requires_grad_(True)
+            s = s.detach()
 
         # iterate over layers and iterations
         input_pose_tokens = None
@@ -746,33 +746,35 @@ class Images2LatentScene(nn.Module):
                 iter_range = range(self.config.model.ttt.n_iters_per_layer)
             
             for iter_idx in iter_range:
-                # Compute self-supervision losses
-                decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, loss_metrics, input_pose_tokens, target_pose_tokens, _, _ = self._compute_ttt_loss(
-                    s, input, target, full_encoded_latents, input_pose_tokens, target_pose_tokens
-                )
+                # Compute self-supervision losses, the model might be wrapped with torch.no_grad() so we need to enable grad here
+                with torch.enable_grad():
+                    s = s.requires_grad_(True)
+                    decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, loss_metrics, input_pose_tokens, target_pose_tokens, _, _ = self._compute_ttt_loss(
+                        s, input, target, full_encoded_latents, input_pose_tokens, target_pose_tokens
+                    )
 
-                if self.config.model.ttt.supervise_mode == "average":
-                    if self.config.training.supervision == "input":
-                        loss = input_loss_metrics["loss"]
-                    elif self.config.training.supervision == "target":
-                        loss = target_loss_metrics["loss"]
-                    if self.config.model.ttt.distill_factor > 0.0:
-                        loss += distillation_loss * self.config.model.ttt.distill_factor
-                    losses.append(loss)
-                
-                # Update state with self-supervision losses
-                grad_norm = self.ttt_grad_normalizers[layer_idx]
-                state_norm = self.ttt_state_normalizers[layer_idx]
-                opt = self.ttt_blocks[layer_idx]
-                lrnet = None
-                if self.config.model.ttt.state_lr_mode in ["learnable", "adaptive", "adaptive_mlp"]:
-                    lrnet = self.ttt_lrnet[layer_idx]
-                
-                s, update_metrics = self._update_state_with_loss(s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], lrnet)
-                
-                # Merge metrics
-                layer_metrics = {**loss_metrics, **update_metrics}
-                ttt_metrics['layers'].append(layer_metrics)
+                    if self.config.model.ttt.supervise_mode == "average":
+                        if self.config.training.supervision == "input":
+                            loss = input_loss_metrics["loss"]
+                        elif self.config.training.supervision == "target":
+                            loss = target_loss_metrics["loss"]
+                        if self.config.model.ttt.distill_factor > 0.0:
+                            loss += distillation_loss * self.config.model.ttt.distill_factor
+                        losses.append(loss)
+                    
+                    # Update state with self-supervision losses
+                    grad_norm = self.ttt_grad_normalizers[layer_idx]
+                    state_norm = self.ttt_state_normalizers[layer_idx]
+                    opt = self.ttt_blocks[layer_idx]
+                    lrnet = None
+                    if self.config.model.ttt.state_lr_mode in ["learnable", "adaptive", "adaptive_mlp"]:
+                        lrnet = self.ttt_lrnet[layer_idx]
+                    
+                    s, update_metrics = self._update_state_with_loss(s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], lrnet)
+                    
+                    # Merge metrics
+                    layer_metrics = {**loss_metrics, **update_metrics}
+                    ttt_metrics['layers'].append(layer_metrics)
 
         # Compute last layer losses
         decoder_input, last_input_loss_metrics, last_target_loss_metrics, last_distillation_loss, last_layer_metrics, _, _, _, rendered_target = self._compute_ttt_loss(

@@ -37,7 +37,7 @@ model:
     detach_decoder_input: false
     detach_opt_input: false
     detach_residual: false
-    decode_chunk_size: 16 # test the best decoding chunk size on your setting
+    decode_chunk_size: 64 # test the best decoding chunk size on your setting
     supervise_mode: random_last
     min_layer: 0 # this is only used for random_last supervise mode
     max_layer: 12 # this is only used for random_last supervise mode
