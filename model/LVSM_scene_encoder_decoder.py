@@ -240,11 +240,35 @@ class Images2LatentScene(nn.Module):
 
         intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
 
-        latent_tokens, input_img_tokens = intermediate_tokens.split(
+        latent_tokens, _ = intermediate_tokens.split(
             [self.config.model.transformer.n_latent_vectors, v_input * n_patches], dim=1
         ) # [b, n_latent_vectors, d], [b, v*n_patches, d]
-                
         
+        # decode input views
+        input_pose_cond = self.get_posed_input(ray_o=input.ray_o, ray_d=input.ray_d)
+        b, v_input, c, h, w = input_pose_cond.size()
+        repeated_latent_tokens = repeat(latent_tokens, 'b nl d -> (b v_input) nl d', v_input=v_input) # [b*v_input, n_latent_vectors, d]
+        input_pose_tokens = self.target_pose_tokenizer(input_pose_cond) # [b*v_input, n_patches, d]
+        decoder_input_tokens = torch.cat((input_pose_tokens, repeated_latent_tokens), dim=1) # [b*v_input, n_latent_vectors + n_patches, d]
+        decoder_input_tokens = self.transformer_input_layernorm_decoder(decoder_input_tokens)
+        transformer_output_tokens = self.pass_layers(self.transformer_decoder, decoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
+        input_image_tokens, _ = transformer_output_tokens.split(
+            [n_patches, n_latent_vectors], dim=1
+        ) # [b*v_input, n_patches, d], [b*v_input, n_latent_vectors, d]
+        rendered_input = self.image_token_decoder(input_image_tokens)
+        height, width = input.image_h_w
+        patch_size = self.config.model.target_pose_tokenizer.patch_size
+        rendered_input = rearrange(
+            rendered_input, "(b v) (h w) (p1 p2 c) -> b v c (h p1) (w p2)",
+            v=v_input,
+            h=height // patch_size, 
+            w=width // patch_size, 
+            p1=patch_size, 
+            p2=patch_size, 
+            c=3
+        )
+
+        # decode target views
         target_pose_cond= self.get_posed_input(ray_o=target.ray_o, ray_d=target.ray_d)
         b, v_target, c, h, w = target_pose_cond.size()
         repeated_latent_tokens = repeat(
@@ -265,13 +289,13 @@ class Images2LatentScene(nn.Module):
         ) # [b*v_target, n_patches, d], [b*v_target, n_latent_vectors, d]
 
         # [b*v_target, n_patches, p*p*3]
-        rendered_images = self.image_token_decoder(target_image_tokens)
+        rendered_target = self.image_token_decoder(target_image_tokens)
         
         height, width = target.image_h_w
 
         patch_size = self.config.model.target_pose_tokenizer.patch_size
-        rendered_images = rearrange(
-            rendered_images, "(b v) (h w) (p1 p2 c) -> b v c (h p1) (w p2)",
+        rendered_target = rearrange(
+            rendered_target, "(b v) (h w) (p1 p2 c) -> b v c (h p1) (w p2)",
             v=v_target,
             h=height // patch_size, 
             w=width // patch_size, 
@@ -280,29 +304,18 @@ class Images2LatentScene(nn.Module):
             c=3
         )
         if has_target_image:
-            # target view loss metrics
-            target_loss_metrics = self.loss_computer(
-                rendered_images[:, :v_target-v_input, ...],
-                target.image[:, :v_target-v_input, ...]
-            )
-            # input view loss metrics
-            input_loss_metrics = self.loss_computer(
-                rendered_images[:, v_target-v_input:, ...],
-                target.image[:, v_target-v_input:, ...]
-            )
+            target_loss_metrics = self.loss_computer(rendered_target, target.image)
+            input_loss_metrics = self.loss_computer(rendered_input, input.image)
         else:
             target_loss_metrics = None
             input_loss_metrics = None
 
-        result = edict(
-            input=input,
-            target=target,
-            input_loss_metrics=input_loss_metrics,
-            target_loss_metrics=target_loss_metrics,
-            render=rendered_images        
-            )
-        
-        return result
+        if self.config.training.supervision == "input":
+            loss = input_loss_metrics["loss"]
+        elif self.config.training.supervision == "target":
+            loss = target_loss_metrics["loss"]
+
+        return input, target, input_loss_metrics, target_loss_metrics, None, rendered_input, rendered_target, loss, None
 
 
     @torch.no_grad()
@@ -472,7 +485,9 @@ class Images2LatentScene(nn.Module):
             print(f"Failed to load {ckpt_paths[-1]}")
             return None
         
-        self.load_state_dict(checkpoint["model"], strict=False)
+        # This function is called during inference, so we need to load the model strictly
+        status = self.load_state_dict(checkpoint["model"], strict=True)
+        print(f"Loaded model from {ckpt_paths[-1]}, the status is {status}")
         return 0
 
 

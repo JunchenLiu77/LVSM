@@ -165,7 +165,6 @@ class Dataset(Dataset):
             target_indices = current_view_idx["target"]
             
             if self.config.training.num_input_views > len(current_view_idx["context"]):
-                print("Triggered here")
                 # randomly sample extra input views in between context views
                 n_extra_input_views = self.config.training.num_input_views - len(context_indices)
                 candidates = list(range(len(frames)))

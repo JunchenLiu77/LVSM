@@ -201,10 +201,7 @@ class Images2LatentScene(nn.Module):
                         use_qk_norm=True,
                         use_positional_encoding=self.config.model.ttt.use_positional_encoding
                     ) for _ in range(self.config.model.ttt.n_blocks_per_layer_lrnet)],
-                    # Activation doesn't help here.
-                    # nn.ReLU(),
-                    # nn.Sigmoid()
-                    # nn.Tanh()
+                    nn.Sigmoid()
                 )
                 lrnet.apply(init_weights)
                 self.ttt_lrnet.append(lrnet)
@@ -219,10 +216,7 @@ class Images2LatentScene(nn.Module):
                     nn.Linear(self.config.model.transformer.d, self.config.model.transformer.d * 4, bias=False),
                     nn.GELU(),
                     nn.Linear(self.config.model.transformer.d * 4, self.config.model.transformer.d, bias=False),
-                    # Activation doesn't help here.
-                    # nn.ReLU(),
-                    # nn.Sigmoid()
-                    # nn.Tanh()
+                    nn.Sigmoid()
                 )
                 lrnet.apply(init_weights)
                 self.ttt_lrnet.append(lrnet)
@@ -1045,6 +1039,7 @@ class Images2LatentScene(nn.Module):
             print(f"Failed to load {ckpt_paths[-1]}")
             return None
         
-        status = self.load_state_dict(checkpoint["model"], strict=False)
+        # This function is called during inference, so we need to load the model strictly
+        status = self.load_state_dict(checkpoint["model"], strict=True)
         print(f"Loaded model from {ckpt_paths[-1]}, the status is {status}")
         return 0
