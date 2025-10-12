@@ -162,6 +162,10 @@ class Generator:
                 overrides.append('model.ttt.detach_residual=true')
             elif args.no_detach_residual is not None and args.no_detach_residual:
                 overrides.append('model.ttt.detach_residual=false')
+            if args.detach_middle is not None and args.detach_middle:
+                overrides.append('model.ttt.detach_middle=true')
+            elif args.no_detach_middle is not None and args.no_detach_middle:
+                overrides.append('model.ttt.detach_middle=false')
             if args.supervise_mode is not None:
                 overrides.append(f'model.ttt.supervise_mode={args.supervise_mode}')
             if args.min_layer is not None:
@@ -226,6 +230,10 @@ class Generator:
             overrides.append('training.freeze_latent=true')
         elif args.no_freeze_latent is not None and args.no_freeze_latent:
             overrides.append('training.freeze_latent=false')
+        if args.freeze_ttt is not None and args.freeze_ttt:
+            overrides.append('training.freeze_ttt=true')
+        elif args.no_freeze_ttt is not None and args.no_freeze_ttt:
+            overrides.append('training.freeze_ttt=false')
         
         # Inference mode
         if args.inference is not None and args.inference:
@@ -449,6 +457,10 @@ def main():
                         help='Detach residual in TTT (encoder-decoder-ttt)')
     parser.add_argument('--no-detach-residual', action='store_true', default=None,
                         help='Do not detach residual in TTT (encoder-decoder-ttt)')
+    parser.add_argument('--detach-middle', action='store_true', default=None,
+                        help='Detach middle in TTT (encoder-decoder-ttt)')
+    parser.add_argument('--no-detach-middle', action='store_true', default=None,
+                        help='Do not detach middle in TTT (encoder-decoder-ttt)')
     parser.add_argument('--ttt-adam-lr', type=float,
                         help='Adam learning rate (encoder-decoder-ttt)')
     parser.add_argument('--ttt-adam-beta1', type=float,
@@ -521,6 +533,10 @@ def main():
                         help='Freeze latent parameters (encoder-decoder-ttt)')
     parser.add_argument('--no-freeze-latent', action='store_true', default=None,
                         help='Do not freeze latent parameters (encoder-decoder-ttt)')
+    parser.add_argument('--freeze-ttt', action='store_true', default=None,
+                        help='Freeze TTT parameters (encoder-decoder-ttt)')
+    parser.add_argument('--no-freeze-ttt', action='store_true', default=None,
+                        help='Do not freeze TTT parameters (encoder-decoder-ttt)')
     parser.add_argument('--torch-compile', action='store_true', default=None,
                         help='Enable torch.compile for model optimization')
     parser.add_argument('--no-torch-compile', action='store_true', default=None,

@@ -37,6 +37,7 @@ model:
     detach_decoder_input: false
     detach_opt_input: false
     detach_residual: false
+    detach_middle: false
     decode_chunk_size: 64 # test the best decoding chunk size on your setting
     supervise_mode: random_last
     min_layer: 0 # this is only used for random_last supervise mode
@@ -125,6 +126,7 @@ training:
   freeze_decoder: false
   freeze_tokenizer: false
   freeze_latent: false
+  freeze_ttt: false
 
 
 # inference / evaluation

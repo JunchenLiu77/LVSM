@@ -315,6 +315,8 @@ class Images2LatentScene(nn.Module):
         elif self.config.training.supervision == "target":
             loss = target_loss_metrics["loss"]
 
+        print(f"allocated memory: {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached memory: {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
+
         return input, target, input_loss_metrics, target_loss_metrics, None, rendered_input, rendered_target, loss, None
 
 

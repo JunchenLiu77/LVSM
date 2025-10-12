@@ -90,13 +90,14 @@ optimizer, optimized_param_dict, all_param_dict = create_optimizer(
     model,
     config.training.weight_decay,
     config.training.lr,
-    config.training.lr_ttt,
     (config.training.beta1, config.training.beta2),
     is_ttt=is_ttt,
+    learning_rate_ttt=config.training.lr_ttt if is_ttt else None,
     freeze_encoder=config.training.get("freeze_encoder", False),
     freeze_decoder=config.training.get("freeze_decoder", False),
     freeze_tokenizer=config.training.get("freeze_tokenizer", False),
     freeze_latent=config.training.get("freeze_latent", False),
+    freeze_ttt=config.training.get("freeze_ttt", False),
 )
 optim_param_list = list(optimized_param_dict.values())
 

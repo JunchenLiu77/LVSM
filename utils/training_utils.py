@@ -59,7 +59,19 @@ def format_number(num):
     return str(num)
 
 
-def create_optimizer(model, weight_decay, learning_rate, learning_rate_ttt, betas, is_ttt=False, freeze_encoder=False, freeze_decoder=False, freeze_tokenizer=False, freeze_latent=False):
+def create_optimizer(
+    model, 
+    weight_decay, 
+    learning_rate, 
+    betas, 
+    is_ttt=False, 
+    learning_rate_ttt=None, 
+    freeze_encoder=False, 
+    freeze_decoder=False, 
+    freeze_tokenizer=False, 
+    freeze_latent=False, 
+    freeze_ttt=False
+):
     # if is_ttt, then 'freeze' parameters determine whether to freeze the encoder and decoder parameters.
     # start with all of the candidate parameters
     all_param_dict = {name: param for name, param in model.named_parameters()}
@@ -74,7 +86,8 @@ def create_optimizer(model, weight_decay, learning_rate, learning_rate_ttt, beta
                 continue
             if (not freeze_encoder and "encoder" in name) or \
                 (not freeze_decoder and "decoder" in name) or \
-                (not freeze_tokenizer and "tokenizer" in name):
+                (not freeze_tokenizer and "tokenizer" in name) or \
+                (not freeze_ttt and "ttt" in name):
                 param.requires_grad = True
             else:
                 param.requires_grad = False
@@ -97,10 +110,13 @@ def create_optimizer(model, weight_decay, learning_rate, learning_rate_ttt, beta
     
     optim_groups = [
         {'params': decay_params, 'weight_decay': weight_decay, 'lr': learning_rate},
-        {'params': decay_params_ttt, 'weight_decay': weight_decay, 'lr': learning_rate_ttt},
         {'params': nodecay_params, 'weight_decay': 0.0, 'lr': learning_rate},
-        {'params': nodecay_params_ttt, 'weight_decay': 0.0, 'lr': learning_rate_ttt}
     ]
+    if is_ttt:
+        assert learning_rate_ttt is not None, "learning_rate_ttt must be provided for TTT"
+        optim_groups.append({'params': decay_params_ttt, 'weight_decay': weight_decay, 'lr': learning_rate_ttt})
+        optim_groups.append({'params': nodecay_params_ttt, 'weight_decay': 0.0, 'lr': learning_rate_ttt})
+        
     # use fused AdamW optimizer by default. 
     optimizer = torch.optim.AdamW(optim_groups, betas=betas,fused=True)
     
