@@ -216,13 +216,15 @@ class Images2LatentScene(nn.Module):
             return pose_cond
         else:
             return torch.cat([images * 2.0 - 1.0, pose_cond], dim=2)
-    
-    
-    def forward(self, data_batch, has_target_image=True):
 
-        input, target = self.process_data(data_batch, has_target_image=has_target_image, target_has_input = self.config.training.target_has_input, compute_rays=True)
+
+    def encode(self, input):
+        """
+        Encode the light_field_latent into latent_tokens with input posed images.
+        """
         checkpoint_every = self.config.training.grad_checkpoint_every
         n_latent_vectors = self.config.model.transformer.n_latent_vectors
+        
         # Process input images
         posed_input_images = self.get_posed_input(
             images=input.image, ray_o=input.ray_o, ray_d=input.ray_d
@@ -230,69 +232,42 @@ class Images2LatentScene(nn.Module):
         b, v_input, c, h, w = posed_input_images.size()
 
         input_img_tokens = self.image_tokenizer(posed_input_images)  # [b*v, n_patches, d]
-
         _, n_patches, d = input_img_tokens.size()  # [b*v, n_patches, d]
         input_img_tokens = input_img_tokens.reshape(b, v_input * n_patches, d)  # [b, v*n_patches, d]
         
         latent_vector_tokens = self.n_light_field_latent.expand(b, -1, -1) # [b, n_latent_vectors, d]
-     
         encoder_input_tokens = torch.cat((latent_vector_tokens, input_img_tokens), dim=1) # [b, n_latent_vectors + v*n_patches, d]
-
-        intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
-
+        print(f"[before encoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
+        intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=False, checkpoint_every=checkpoint_every)
+        print(f"[after encoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
         latent_tokens, _ = intermediate_tokens.split(
             [self.config.model.transformer.n_latent_vectors, v_input * n_patches], dim=1
         ) # [b, n_latent_vectors, d], [b, v*n_patches, d]
-        
-        # decode input views
-        input_pose_cond = self.get_posed_input(ray_o=input.ray_o, ray_d=input.ray_d)
-        b, v_input, c, h, w = input_pose_cond.size()
-        repeated_latent_tokens = repeat(latent_tokens, 'b nl d -> (b v_input) nl d', v_input=v_input) # [b*v_input, n_latent_vectors, d]
-        input_pose_tokens = self.target_pose_tokenizer(input_pose_cond) # [b*v_input, n_patches, d]
-        decoder_input_tokens = torch.cat((input_pose_tokens, repeated_latent_tokens), dim=1) # [b*v_input, n_latent_vectors + n_patches, d]
-        decoder_input_tokens = self.transformer_input_layernorm_decoder(decoder_input_tokens)
-        transformer_output_tokens = self.pass_layers(self.transformer_decoder, decoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
-        input_image_tokens, _ = transformer_output_tokens.split(
-            [n_patches, n_latent_vectors], dim=1
-        ) # [b*v_input, n_patches, d], [b*v_input, n_latent_vectors, d]
-        rendered_input = self.image_token_decoder(input_image_tokens)
-        height, width = input.image_h_w
-        patch_size = self.config.model.target_pose_tokenizer.patch_size
-        rendered_input = rearrange(
-            rendered_input, "(b v) (h w) (p1 p2 c) -> b v c (h p1) (w p2)",
-            v=v_input,
-            h=height // patch_size, 
-            w=width // patch_size, 
-            p1=patch_size, 
-            p2=patch_size, 
-            c=3
-        )
+        return latent_tokens
 
-        # decode target views
-        target_pose_cond= self.get_posed_input(ray_o=target.ray_o, ray_d=target.ray_d)
+
+    def decode(self, target, latent_tokens):
+        """
+        Decode the target view images with the latent tokens and target poses.
+        """
+        checkpoint_every = self.config.training.grad_checkpoint_every
+        n_latent_vectors = self.config.model.transformer.n_latent_vectors
+        
+        target_pose_cond = self.get_posed_input(ray_o=target.ray_o, ray_d=target.ray_d)
         b, v_target, c, h, w = target_pose_cond.size()
-        repeated_latent_tokens = repeat(
-                                latent_tokens,
-                                'b nl d -> (b v_target) nl d', 
-                                v_target=v_target) 
-
+        repeated_latent_tokens = repeat(latent_tokens, 'b nl d -> (b v_target) nl d', v_target=v_target) # [b*v_target, n_latent_vectors, d]
         target_pose_tokens = self.target_pose_tokenizer(target_pose_cond) # [b*v_target, n_patches, d]
-        
+        n_patches = target_pose_tokens.size(1)
         decoder_input_tokens = torch.cat((target_pose_tokens, repeated_latent_tokens), dim=1) # [b*v_target, n_latent_vectors + n_patches, d]
         decoder_input_tokens = self.transformer_input_layernorm_decoder(decoder_input_tokens)
-
+        print(f"[before decoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
         transformer_output_tokens = self.pass_layers(self.transformer_decoder, decoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
-
-        # Discard the latent tokens
+        print(f"[after decoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
         target_image_tokens, _ = transformer_output_tokens.split(
             [n_patches, n_latent_vectors], dim=1
         ) # [b*v_target, n_patches, d], [b*v_target, n_latent_vectors, d]
-
-        # [b*v_target, n_patches, p*p*3]
         rendered_target = self.image_token_decoder(target_image_tokens)
-        
         height, width = target.image_h_w
-
         patch_size = self.config.model.target_pose_tokenizer.patch_size
         rendered_target = rearrange(
             rendered_target, "(b v) (h w) (p1 p2 c) -> b v c (h p1) (w p2)",
@@ -303,6 +278,19 @@ class Images2LatentScene(nn.Module):
             p2=patch_size, 
             c=3
         )
+        return rendered_target
+
+
+    def forward(self, data_batch, has_target_image=True):
+        input, target = self.process_data(data_batch, has_target_image=has_target_image, target_has_input = self.config.training.target_has_input, compute_rays=True)
+        
+        # encode input views
+        latent_tokens = self.encode(input) # [b, n_latent_vectors, d]
+        
+        # decode input and target views
+        rendered_input = self.decode(input, latent_tokens)
+        rendered_target = self.decode(target, latent_tokens)
+
         if has_target_image:
             target_loss_metrics = self.loss_computer(rendered_target, target.image)
             input_loss_metrics = self.loss_computer(rendered_input, input.image)
@@ -314,8 +302,6 @@ class Images2LatentScene(nn.Module):
             loss = input_loss_metrics["loss"]
         elif self.config.training.supervision == "target":
             loss = target_loss_metrics["loss"]
-
-        print(f"allocated memory: {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached memory: {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
 
         return input, target, input_loss_metrics, target_loss_metrics, None, rendered_input, rendered_target, loss, None
 

@@ -13,7 +13,14 @@ import traceback
 from utils import camera_utils, data_utils
 from .transformer import QK_Norm_TransformerBlock, init_weights
 from .loss import LossComputer
+from contextlib import nullcontext
 
+amp_dtype_mapping = {
+    "fp16": torch.float16, 
+    "bf16": torch.bfloat16, 
+    "fp32": torch.float32, 
+    'tf32': torch.float32
+}
 
 class Images2LatentScene(nn.Module):
     def __init__(self, config):
@@ -36,9 +43,6 @@ class Images2LatentScene(nn.Module):
         
         # Initialize loss computer
         self.loss_computer = LossComputer(config)
-
-        # Flag to track if we are in TTT mode to disable gradient checkpointing
-        self._in_ttt_mode = False
         
         # Count TTT parameters for logging
         self.ttt_param_counts = {
@@ -65,6 +69,7 @@ class Images2LatentScene(nn.Module):
                 'trainable': block_trainable
             })
 
+
     def _create_tokenizer(self, in_channels, patch_size, d_model):
         """Helper function to create a tokenizer with given config"""
         tokenizer = nn.Sequential(
@@ -80,8 +85,8 @@ class Images2LatentScene(nn.Module):
             ),
         )
         tokenizer.apply(init_weights)
-
         return tokenizer
+
 
     def _init_tokenizers(self):
         """Initialize the image and target pose tokenizers, and image token decoder"""
@@ -169,6 +174,7 @@ class Images2LatentScene(nn.Module):
         self.transformer_encoder = nn.ModuleList(self.transformer_encoder)
         self.transformer_decoder = nn.ModuleList(self.transformer_decoder)
         self.transformer_input_layernorm_decoder = nn.LayerNorm(config.d, bias=False)
+
 
     def _init_ttt(self):
         # Initialize state learning rate based on configuration
@@ -344,7 +350,7 @@ class Images2LatentScene(nn.Module):
         super().train(mode)
         self.loss_computer.eval()
 
-    
+
     def pass_layers(self, transformer_blocks, input_tokens, gradient_checkpoint=False, checkpoint_every=1):
         """
         Helper function to pass input tokens through all transformer blocks with optional gradient checkpointing.
@@ -389,7 +395,7 @@ class Images2LatentScene(nn.Module):
             )
             
         return input_tokens
-            
+
 
     def get_posed_input(self, images=None, ray_o=None, ray_d=None, method="default_plucker"):
         '''
@@ -421,7 +427,8 @@ class Images2LatentScene(nn.Module):
             return pose_cond
         else:
             return torch.cat([images * 2.0 - 1.0, pose_cond], dim=2)
-    
+
+
     def encode(self, input):
         """
         Encode the light_field_latent into latent_tokens with input posed images.
@@ -443,7 +450,7 @@ class Images2LatentScene(nn.Module):
         input_img_tokens = input_img_tokens.reshape(b, v_input * n_patches, d)  # [b, v*n_patches, d]
         latent_vector_tokens = self.n_light_field_latent.expand(b, -1, -1) # [b, n_latent_vectors, d]
         encoder_input_tokens = torch.cat((latent_vector_tokens, input_img_tokens), dim=1) # [b, n_latent_vectors + v*n_patches, d]
-        intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint and not self._in_ttt_mode, checkpoint_every=checkpoint_every)
+        intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
         partial_encoded_latents, input_img_tokens = intermediate_tokens.split([n_latent_vectors, v_input * n_patches], dim=1) # [b, n_latent_vectors, d], [b, v*n_patches, d]
         
         full_encoded_latents = None
@@ -455,10 +462,11 @@ class Images2LatentScene(nn.Module):
             input_img_tokens = input_img_tokens.reshape(b, v_input * n_patches, d)  # [b, v*n_patches, d]
             latent_vector_tokens = self.n_light_field_latent.expand(b, -1, -1) # [b, n_latent_vectors, d]
             encoder_input_tokens = torch.cat((latent_vector_tokens, input_img_tokens), dim=1) # [b, n_latent_vectors + v*n_patches, d]
-            intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint and not self._in_ttt_mode, checkpoint_every=checkpoint_every)
+            intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
             full_encoded_latents, input_img_tokens = intermediate_tokens.split([n_latent_vectors, v_input * n_patches], dim=1) # [b, n_latent_vectors, d], [b, v*n_patches, d]
         
         return partial_encoded_latents, full_encoded_latents
+
 
     def decode(self, target, latent_tokens, target_pose_tokens=None, last_n=None):
         """
@@ -474,7 +482,7 @@ class Images2LatentScene(nn.Module):
             target_pose_cond = self.get_posed_input(ray_o=target.ray_o, ray_d=target.ray_d)  # [b, v_target, c, h, w]
             target_pose_cond = target_pose_cond[:, -v_target:, ...]
             target_pose_tokens = self.target_pose_tokenizer(target_pose_cond)  # [b*v_target, n_patches, d]
-
+        
         _, n_patches, d = target_pose_tokens.size()
         height, width = target.image_h_w
         patch_size = self.config.model.target_pose_tokenizer.patch_size
@@ -496,13 +504,15 @@ class Images2LatentScene(nn.Module):
 
             decoder_input_tokens = torch.cat((this_target_pose_tokens, this_latent_tokens), dim=1)  # [b*this_v, n_latent_vectors + n_patches, d]
             decoder_input_tokens = self.transformer_input_layernorm_decoder(decoder_input_tokens)
+            print(f"[decode {start} to {end}, before decoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
             transformer_output_tokens = self.pass_layers(
                 self.transformer_decoder,
                 decoder_input_tokens,
-                gradient_checkpoint=self.config.training.grad_checkpoint and not self._in_ttt_mode,
+                gradient_checkpoint=self.config.training.grad_checkpoint,
                 checkpoint_every=checkpoint_every
             )
-
+            print(f"[decode {start} to {end}, after decoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
+            
             # Discard the latent tokens
             target_image_tokens, _ = transformer_output_tokens.split([n_patches, n_latent_vectors], dim=1)  # [b*this_v, n_patches, d]
 
@@ -521,7 +531,8 @@ class Images2LatentScene(nn.Module):
 
         rendered_images = torch.cat(rendered_chunks, dim=1)  # [b, v_target, c, H, W]
         return rendered_images, target_pose_tokens
-    
+
+
     def _compute_ttt_loss(
         self, 
         s, 
@@ -560,12 +571,13 @@ class Images2LatentScene(nn.Module):
         layer_metrics = {}
         
         # render input views and compute input loss
-        with torch.no_grad() if not input_need_grad else torch.enable_grad():
+        # with (torch.no_grad() if not input_need_grad else torch.enable_grad()), torch.autocast(enabled=self.config.training.use_amp, device_type="cuda", dtype=amp_dtype_mapping[self.config.training.amp_dtype]):
+        with nullcontext():
             rendered_input, input_pose_tokens = self.decode(
                 input, 
                 decoder_input, 
                 target_pose_tokens=input_pose_tokens, 
-                last_n=self.config.training.num_input_views - self.config.model.ttt.n_encoder_inputs
+                last_n=self.config.training.num_input_views - self.config.model.ttt.n_encoder_inputs,
             )
             input_loss_metrics = self.loss_computer(rendered_input, input.image[:, self.config.model.ttt.n_encoder_inputs:, ...])
             layer_metrics["input_loss"] = input_loss_metrics["loss"].item()
@@ -574,7 +586,8 @@ class Images2LatentScene(nn.Module):
         rendered_target = None
         target_loss_metrics = None
         if self.config.model.ttt.supervise_mode == "average" or self.config.model.ttt.supervise_mode == "g3r" or compute_target_loss:
-            with torch.no_grad() if not target_need_grad else torch.enable_grad():
+            # with (torch.no_grad() if not target_need_grad else torch.enable_grad()), torch.autocast(enabled=self.config.training.use_amp, device_type="cuda", dtype=amp_dtype_mapping[self.config.training.amp_dtype]):
+            with nullcontext():
                 rendered_target, target_pose_tokens = self.decode(target, decoder_input, target_pose_tokens=target_pose_tokens)
                 target_loss_metrics = self.loss_computer(rendered_target, target.image)
                 layer_metrics["target_loss"] = target_loss_metrics["loss"].item()
@@ -588,7 +601,7 @@ class Images2LatentScene(nn.Module):
             layer_metrics["distillation_loss"] = distillation_loss.item()
         
         return decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, layer_metrics, input_pose_tokens, target_pose_tokens, rendered_input, rendered_target
-    
+
 
     def _update_state_with_loss(
         self, 
@@ -635,7 +648,8 @@ class Images2LatentScene(nn.Module):
         layer_metrics["orig_grad_mean"] = torch.mean(torch.abs(grad_s)).item()
         layer_metrics["orig_grad_std"] = torch.std(grad_s).item()
 
-        with torch.no_grad() if not need_grad else torch.enable_grad():
+        # with (torch.no_grad() if not need_grad else torch.enable_grad()), torch.autocast(enabled=self.config.training.use_amp, device_type="cuda", dtype=amp_dtype_mapping[self.config.training.amp_dtype]):
+        with nullcontext():
             # normalize gradient after detach. otherwise the normalizer will get no gradients.
             grad_s_normed = grad_s / (grad_s.std(dim=(-1), keepdim=True) + 1e-10) # [b, n_latent_vectors, d]
             grad_s_normed = grad_norm(grad_s_normed) # [b, n_latent_vectors, d]
@@ -737,8 +751,8 @@ class Images2LatentScene(nn.Module):
                 layer_metrics['state_lr_std'] = torch.std(state_lr).item()
         
         return s, layer_metrics
-    
-    
+
+
     def ttt_forward(self, input, target):
         """
         Update the latent tokens with the TTT blocks. Returns the updated state and TTT metrics for logging.
@@ -751,9 +765,6 @@ class Images2LatentScene(nn.Module):
             s: Updated latent tokens [b, n_latent_vectors, d]
             ttt_metrics: TTT metrics
         """
-        # Disable gradient checkpointing during TTT to avoid double differentiation
-        self._in_ttt_mode = True
-
         partial_encoded_latents, full_encoded_latents = self.encode(input)
         s = partial_encoded_latents
         if self.config.model.ttt.detach_s0:
@@ -772,6 +783,7 @@ class Images2LatentScene(nn.Module):
                 max_iter = random.randint(self.config.model.ttt.min_layer, self.config.model.ttt.max_layer)
             else:
                 max_iter = self.config.model.ttt.n_iters_per_layer
+            # print(f"[ttt_forward] loop for {max_iter} iterations")
             
             for iter_idx in range(max_iter):
                 # input: always need gradient -- We need to calculate gradient later.
@@ -841,8 +853,10 @@ class Images2LatentScene(nn.Module):
 
         # TODO: hacky replacing
         # Render full input images, only for visualization
-        rendered_input, _ = self.decode(input, decoder_input)
-
+        with torch.no_grad(), torch.autocast(enabled=self.config.training.use_amp, device_type="cuda", dtype=amp_dtype_mapping[self.config.training.amp_dtype]):
+        # with nullcontext():
+            rendered_input, _ = self.decode(input, decoder_input)
+        
         ttt_metrics["last_input_loss"] = last_layer_metrics["input_loss"]
         ttt_metrics["last_target_loss"] = last_layer_metrics["target_loss"]
         if self.config.model.ttt.distill_factor > 0.0:
@@ -851,14 +865,9 @@ class Images2LatentScene(nn.Module):
         loss = sum(losses) / len(losses)
         ttt_metrics["loss"] = loss.item()
 
-        # Re-enable gradient checkpointing after TTT
-        self._in_ttt_mode = False
-
-        print(f"[last layer]: allocated memory: {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached memory: {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
-
         return input, target, last_input_loss_metrics, last_target_loss_metrics, last_distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
 
-    
+
     def ttt_forward_g3r(self, input, target, layer_idx, iter_idx, s=None, full_encoded_latents=None, input_pose_tokens=None, target_pose_tokens=None, update=True):
         """
         Forward the latent tokens with the TTT blocks for G3R supervision. Returns the updated state and TTT metrics for logging.
@@ -877,9 +886,6 @@ class Images2LatentScene(nn.Module):
         """
         assert layer_idx is not None and iter_idx is not None, "layer_idx and iter_idx must be provided for G3R supervision"
         raise NotImplementedError("check whether gradient in this case is needed")
-
-        # Disable gradient checkpointing during TTT to avoid double differentiation
-        self._in_ttt_mode = True
 
         if s is None:
             assert layer_idx == 0 and iter_idx == 0, "layer_idx and iter_idx must be 0 for G3R supervision when s is not provided"
@@ -910,7 +916,8 @@ class Images2LatentScene(nn.Module):
             layer_metrics = {**loss_metrics, **update_metrics}
         else:
             # TODO: hacky replacing
-            rendered_input, _ = self.decode(input, decoder_input)
+            with torch.no_grad(), torch.autocast(enabled=self.config.training.use_amp, device_type="cuda", dtype=amp_dtype_mapping[self.config.training.amp_dtype]):
+                rendered_input, _ = self.decode(input, decoder_input)
 
         if self.config.training.supervision == "input":
             loss = input_loss_metrics["loss"]
@@ -919,12 +926,9 @@ class Images2LatentScene(nn.Module):
         if self.config.model.ttt.distill_factor > 0.0:
             loss += distillation_loss * self.config.model.ttt.distill_factor
 
-        # Re-enable gradient checkpointing after TTT
-        self._in_ttt_mode = False
-
         return input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics
-    
-    
+
+
     def forward(self, data_batch, has_target_image=True, layer_idx=None, iter_idx=None, **kwargs):
         assert has_target_image, "JC: we might need to support this?"
         if kwargs.get("input") is None or kwargs.get("target") is None:
@@ -1095,6 +1099,7 @@ class Images2LatentScene(nn.Module):
         data_batch.video_rendering = video_rendering
 
         return data_batch
+
 
     @torch.no_grad()
     def load_ckpt(self, load_path):
