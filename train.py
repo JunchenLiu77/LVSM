@@ -248,6 +248,7 @@ while cur_train_step <= total_train_steps:
 
         export_inter_results = ((cur_train_step-1) == start_train_step) or (cur_train_step % config.training.vis_every == 0)
 
+        total_grad_norm = None
         if update_grads:
             skip_optimizer_step = False
             # Skip optimizer step if loss is NaN or Inf
@@ -259,7 +260,6 @@ while cur_train_step <= total_train_steps:
                 elif config.training.supervision == "input":
                     input_loss_metrics.loss.data = torch.zeros_like(loss)
 
-            total_grad_norm = None
             # Check gradient norm and update optimizer if everything is fine
             if not skip_optimizer_step:
                 # Unscales the gradients

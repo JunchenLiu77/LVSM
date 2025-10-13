@@ -504,14 +504,14 @@ class Images2LatentScene(nn.Module):
 
             decoder_input_tokens = torch.cat((this_target_pose_tokens, this_latent_tokens), dim=1)  # [b*this_v, n_latent_vectors + n_patches, d]
             decoder_input_tokens = self.transformer_input_layernorm_decoder(decoder_input_tokens)
-            print(f"[decode {start} to {end}, before decoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
+            # print(f"[decode {start} to {end}, before decoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
             transformer_output_tokens = self.pass_layers(
                 self.transformer_decoder,
                 decoder_input_tokens,
                 gradient_checkpoint=self.config.training.grad_checkpoint,
                 checkpoint_every=checkpoint_every
             )
-            print(f"[decode {start} to {end}, after decoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
+            # print(f"[decode {start} to {end}, after decoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
             
             # Discard the latent tokens
             target_image_tokens, _ = transformer_output_tokens.split([n_patches, n_latent_vectors], dim=1)  # [b*this_v, n_patches, d]
@@ -829,7 +829,7 @@ class Images2LatentScene(nn.Module):
                     s = s.detach()
 
                 # debug: print the memory usage after each update
-                print(f"[{layer_idx}, {iter_idx}]: allocated memory: {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached memory: {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
+                # print(f"[{layer_idx}, {iter_idx}]: allocated: {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached memory: {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
 
         # Compute the last layer losses
         # input: dont need gradient unless supervise input at training time
