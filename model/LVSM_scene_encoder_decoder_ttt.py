@@ -222,7 +222,6 @@ class Images2LatentScene(nn.Module):
                     nn.Linear(self.config.model.transformer.d, self.config.model.transformer.d * 4, bias=False),
                     nn.GELU(),
                     nn.Linear(self.config.model.transformer.d * 4, self.config.model.transformer.d, bias=False),
-                    nn.Sigmoid()
                 )
                 lrnet.apply(init_weights)
                 self.ttt_lrnet.append(lrnet)
@@ -731,7 +730,9 @@ class Images2LatentScene(nn.Module):
                 assert lrnet is not None, "lrnet is required for adaptive state_lr"
                 # Pass the "magnitude" of gradient to the lrnet. Since the gradient can be small, we use the log scale as the input.
                 log_abs_grad_s = torch.log(torch.abs(grad_s) + 1e-10)
-                state_lr = lrnet(log_abs_grad_s) # [b, n_latent_vectors, d]
+                # adding a bias term to make the output around -2 before sigmoid, the learning rate will be around 0.1-0.2 at the beginning.
+                # This makes the residual update smaller at the beginning while maintaining relatively big gradient for the lrnet.
+                state_lr = torch.sigmoid(lrnet(log_abs_grad_s) - self.config.model.ttt.state_lr_init) # [b, n_latent_vectors, d]
             else:
                 # Use fixed state_lr from config
                 state_lr = self.config.model.ttt.state_lr
