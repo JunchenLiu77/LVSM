@@ -456,14 +456,18 @@ class Images2LatentScene(nn.Module):
         full_encoded_latents = None
         if self.config.model.ttt.distill_factor > 0.0:
             # latent token with using all input views, which provide teacher signal for distillation
-            v_input = posed_input_images.size(1)
-            input_img_tokens = self.image_tokenizer(posed_input_images)  # [b*v, n_patches, d]
-            _, n_patches, d = input_img_tokens.size()  # [b*v, n_patches, d]
-            input_img_tokens = input_img_tokens.reshape(b, v_input * n_patches, d)  # [b, v*n_patches, d]
-            latent_vector_tokens = self.n_light_field_latent.expand(b, -1, -1) # [b, n_latent_vectors, d]
-            encoder_input_tokens = torch.cat((latent_vector_tokens, input_img_tokens), dim=1) # [b, n_latent_vectors + v*n_patches, d]
-            intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
-            full_encoded_latents, input_img_tokens = intermediate_tokens.split([n_latent_vectors, v_input * n_patches], dim=1) # [b, n_latent_vectors, d], [b, v*n_patches, d]
+            if self.config.model.ttt.n_encoder_inputs == posed_input_images.size(1):
+                # have already used all input views in partial_encoded_latents
+                full_encoded_latents = partial_encoded_latents
+            else:
+                v_input = posed_input_images.size(1)
+                input_img_tokens = self.image_tokenizer(posed_input_images)  # [b*v, n_patches, d]
+                _, n_patches, d = input_img_tokens.size()  # [b*v, n_patches, d]
+                input_img_tokens = input_img_tokens.reshape(b, v_input * n_patches, d)  # [b, v*n_patches, d]
+                latent_vector_tokens = self.n_light_field_latent.expand(b, -1, -1) # [b, n_latent_vectors, d]
+                encoder_input_tokens = torch.cat((latent_vector_tokens, input_img_tokens), dim=1) # [b, n_latent_vectors + v*n_patches, d]
+                intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
+                full_encoded_latents, input_img_tokens = intermediate_tokens.split([n_latent_vectors, v_input * n_patches], dim=1) # [b, n_latent_vectors, d], [b, v*n_patches, d]
         
         return partial_encoded_latents, full_encoded_latents
 
@@ -578,9 +582,10 @@ class Images2LatentScene(nn.Module):
                 input, 
                 decoder_input, 
                 target_pose_tokens=input_pose_tokens, 
-                last_n=self.config.training.num_input_views - self.config.model.ttt.n_encoder_inputs,
+                # last_n=self.config.training.num_input_views - self.config.model.ttt.n_encoder_inputs,
+                last_n=self.config.model.ttt.n_ss_inputs,
             )
-            input_loss_metrics = self.loss_computer(rendered_input, input.image[:, self.config.model.ttt.n_encoder_inputs:, ...])
+            input_loss_metrics = self.loss_computer(rendered_input, input.image[:, -self.config.model.ttt.n_ss_inputs:, ...])
             layer_metrics["input_loss"] = input_loss_metrics["loss"].item()
 
         # render target views and compute target loss

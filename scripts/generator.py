@@ -182,6 +182,8 @@ class Generator:
                 overrides.append(f'model.ttt.normalizer_eps={args.normalizer_eps}')
             if args.n_encoder_inputs is not None:
                 overrides.append(f'model.ttt.n_encoder_inputs={args.n_encoder_inputs}')
+            if args.n_ss_inputs is not None:
+                overrides.append(f'model.ttt.n_ss_inputs={args.n_ss_inputs}')
             if args.distill_factor is not None:
                 overrides.append(f'model.ttt.distill_factor={args.distill_factor}')
                 
@@ -490,6 +492,8 @@ def main():
                         help='Normalizer eps (encoder-decoder-ttt)')
     parser.add_argument('--n-encoder-inputs', type=int,
                         help='Number of encoder inputs (encoder-decoder-ttt)')
+    parser.add_argument('--n-ss-inputs', type=int,
+                        help='Number of ss inputs (encoder-decoder-ttt)')
     parser.add_argument('--distill-factor', type=float,
                         help='Distillation factor (encoder-decoder-ttt)')
     

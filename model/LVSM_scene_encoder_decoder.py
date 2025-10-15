@@ -237,9 +237,9 @@ class Images2LatentScene(nn.Module):
         
         latent_vector_tokens = self.n_light_field_latent.expand(b, -1, -1) # [b, n_latent_vectors, d]
         encoder_input_tokens = torch.cat((latent_vector_tokens, input_img_tokens), dim=1) # [b, n_latent_vectors + v*n_patches, d]
-        print(f"[before encoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
+        # print(f"[before encoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
         intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=False, checkpoint_every=checkpoint_every)
-        print(f"[after encoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
+        # print(f"[after encoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
         latent_tokens, _ = intermediate_tokens.split(
             [self.config.model.transformer.n_latent_vectors, v_input * n_patches], dim=1
         ) # [b, n_latent_vectors, d], [b, v*n_patches, d]
@@ -260,9 +260,9 @@ class Images2LatentScene(nn.Module):
         n_patches = target_pose_tokens.size(1)
         decoder_input_tokens = torch.cat((target_pose_tokens, repeated_latent_tokens), dim=1) # [b*v_target, n_latent_vectors + n_patches, d]
         decoder_input_tokens = self.transformer_input_layernorm_decoder(decoder_input_tokens)
-        print(f"[before decoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
+        # print(f"[before decoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
         transformer_output_tokens = self.pass_layers(self.transformer_decoder, decoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
-        print(f"[after decoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
+        # print(f"[after decoder]: alloced {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
         target_image_tokens, _ = transformer_output_tokens.split(
             [n_patches, n_latent_vectors], dim=1
         ) # [b*v_target, n_patches, d], [b*v_target, n_latent_vectors, d]
@@ -474,7 +474,7 @@ class Images2LatentScene(nn.Module):
             return None
         
         # This function is called during inference, so we need to load the model strictly
-        status = self.load_state_dict(checkpoint["model"], strict=True)
+        status = self.load_state_dict(checkpoint["model"], strict=False)
         print(f"Loaded model from {ckpt_paths[-1]}, the status is {status}")
         return 0
 
