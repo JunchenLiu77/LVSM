@@ -37,7 +37,7 @@ class Generator:
         self.slurm_defaults = {
             'job_name': 'lvsm',
             'account': 'aip-fsanja',
-            'time': '00-08:00:00',
+            'time': '01-00:00:00',
             'nodes': 1,
             'mem': '48GB',
             'cpus_per_task': 8,

@@ -572,7 +572,8 @@ class Images2LatentScene(nn.Module):
         
         # render input views and compute input loss
         # with (torch.no_grad() if not input_need_grad else torch.enable_grad()), torch.autocast(enabled=self.config.training.use_amp, device_type="cuda", dtype=amp_dtype_mapping[self.config.training.amp_dtype]):
-        with nullcontext():
+        # with nullcontext():
+        with torch.enable_grad():
             rendered_input, input_pose_tokens = self.decode(
                 input, 
                 decoder_input, 
@@ -587,10 +588,10 @@ class Images2LatentScene(nn.Module):
         target_loss_metrics = None
         if self.config.model.ttt.supervise_mode == "average" or self.config.model.ttt.supervise_mode == "g3r" or compute_target_loss:
             # with (torch.no_grad() if not target_need_grad else torch.enable_grad()), torch.autocast(enabled=self.config.training.use_amp, device_type="cuda", dtype=amp_dtype_mapping[self.config.training.amp_dtype]):
-            with nullcontext():
-                rendered_target, target_pose_tokens = self.decode(target, decoder_input, target_pose_tokens=target_pose_tokens)
-                target_loss_metrics = self.loss_computer(rendered_target, target.image)
-                layer_metrics["target_loss"] = target_loss_metrics["loss"].item()
+            # with nullcontext():
+            rendered_target, target_pose_tokens = self.decode(target, decoder_input, target_pose_tokens=target_pose_tokens)
+            target_loss_metrics = self.loss_computer(rendered_target, target.image)
+            layer_metrics["target_loss"] = target_loss_metrics["loss"].item()
         
         # compute the distillation loss
         distillation_loss = None
