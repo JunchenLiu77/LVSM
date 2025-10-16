@@ -312,6 +312,7 @@ while cur_train_step <= total_train_steps:
         # print in console
         if (cur_train_step % config.training.print_every == 0) or (cur_train_step < 100 + start_train_step):
             print_str = f"[Epoch {int(cur_epoch):>3d}] | Forwad step: {int(cur_train_step):>6d} (Param update step: {int(cur_param_update_step):>6d})"
+            print_str += f" | ttt_iters: {ttt_metrics['n_iters']} | ttt_encoder_views: {ttt_metrics['n_encoder_views']} | ttt_ss_views: {ttt_metrics['n_ss_views']}"
             print_str += f" | Iter Time: {(time.time() - tic)/n_iters:.2f}s | LR: {optimizer.param_groups[0]['lr']:.6f}"
             # Add loss values
             print_str += "\ntarget: "

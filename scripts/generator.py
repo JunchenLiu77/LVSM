@@ -180,10 +180,14 @@ class Generator:
                 overrides.append('model.ttt.normalizer_affine=false')
             if args.normalizer_eps is not None:
                 overrides.append(f'model.ttt.normalizer_eps={args.normalizer_eps}')
-            if args.n_encoder_inputs is not None:
-                overrides.append(f'model.ttt.n_encoder_inputs={args.n_encoder_inputs}')
-            if args.n_ss_inputs is not None:
-                overrides.append(f'model.ttt.n_ss_inputs={args.n_ss_inputs}')
+            if args.n_encoder_inputs_min is not None:
+                overrides.append(f'model.ttt.n_encoder_inputs_min={args.n_encoder_inputs_min}')
+            if args.n_encoder_inputs_max is not None:
+                overrides.append(f'model.ttt.n_encoder_inputs_max={args.n_encoder_inputs_max}')
+            if args.n_ss_inputs_min is not None:
+                overrides.append(f'model.ttt.n_ss_inputs_min={args.n_ss_inputs_min}')
+            if args.n_ss_inputs_max is not None:
+                overrides.append(f'model.ttt.n_ss_inputs_max={args.n_ss_inputs_max}')
             if args.distill_factor is not None:
                 overrides.append(f'model.ttt.distill_factor={args.distill_factor}')
                 
@@ -490,10 +494,14 @@ def main():
                         help='Do not normalizer affine (encoder-decoder-ttt)')
     parser.add_argument('--normalizer-eps', type=float,
                         help='Normalizer eps (encoder-decoder-ttt)')
-    parser.add_argument('--n-encoder-inputs', type=int,
-                        help='Number of encoder inputs (encoder-decoder-ttt)')
-    parser.add_argument('--n-ss-inputs', type=int,
-                        help='Number of ss inputs (encoder-decoder-ttt)')
+    parser.add_argument('--n-encoder-inputs-min', type=int,
+                        help='Minimum number of encoder inputs (encoder-decoder-ttt)')
+    parser.add_argument('--n-encoder-inputs-max', type=int,
+                        help='Maximum number of encoder inputs (encoder-decoder-ttt)')
+    parser.add_argument('--n-ss-inputs-min', type=int,
+                        help='Minimum number of ss inputs (encoder-decoder-ttt)')
+    parser.add_argument('--n-ss-inputs-max', type=int,
+                        help='Maximum number of ss inputs (encoder-decoder-ttt)')
     parser.add_argument('--distill-factor', type=float,
                         help='Distillation factor (encoder-decoder-ttt)')
     
@@ -601,7 +609,7 @@ def main():
     
     if args.submit and not args.dry_run:
         print(f"Submitting job...")
-        os.system(f"sbatch {script_path}")
+        os.system(f"sbatch --exclude=kn127 {script_path}")
     else:
         print(f"To submit: sbatch {script_path}")
 

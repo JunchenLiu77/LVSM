@@ -46,8 +46,10 @@ model:
     normalizer_type: rms_norm
     normalizer_affine: true
     normalizer_eps: 1e-10
-    n_encoder_inputs: 1
-    n_ss_inputs: 1
+    n_encoder_inputs_min: 1
+    n_encoder_inputs_max: 1
+    n_ss_inputs_min: 1
+    n_ss_inputs_max: 1
     adam:
       lr: 1e-3
       beta1: 0.9

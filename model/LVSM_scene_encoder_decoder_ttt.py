@@ -428,7 +428,7 @@ class Images2LatentScene(nn.Module):
             return torch.cat([images * 2.0 - 1.0, pose_cond], dim=2)
 
 
-    def encode(self, input):
+    def encode(self, input, n_encoder_views):
         """
         Encode the light_field_latent into latent_tokens with input posed images.
         """
@@ -442,7 +442,7 @@ class Images2LatentScene(nn.Module):
         b, _, c, h, w = posed_input_images.size()
 
         # latent token with only using the first n_encoder_inputs input views
-        v_input = self.config.model.ttt.n_encoder_inputs
+        v_input = n_encoder_views
         partial_posed_input_images = posed_input_images[:, :v_input, ...]
         input_img_tokens = self.image_tokenizer(partial_posed_input_images)  # [b*v, n_patches, d]
         _, n_patches, d = input_img_tokens.size()  # [b*v, n_patches, d]
@@ -455,7 +455,7 @@ class Images2LatentScene(nn.Module):
         full_encoded_latents = None
         if self.config.model.ttt.distill_factor > 0.0:
             # latent token with using all input views, which provide teacher signal for distillation
-            if self.config.model.ttt.n_encoder_inputs == posed_input_images.size(1):
+            if n_encoder_views == posed_input_images.size(1):
                 # have already used all input views in partial_encoded_latents
                 full_encoded_latents = partial_encoded_latents
             else:
@@ -541,6 +541,7 @@ class Images2LatentScene(nn.Module):
         s, 
         input, 
         target, 
+        n_ss_views,
         full_encoded_latents=None, 
         input_pose_tokens=None, 
         target_pose_tokens=None, 
@@ -581,10 +582,9 @@ class Images2LatentScene(nn.Module):
                 input, 
                 decoder_input, 
                 target_pose_tokens=input_pose_tokens, 
-                # last_n=self.config.training.num_input_views - self.config.model.ttt.n_encoder_inputs,
-                last_n=self.config.model.ttt.n_ss_inputs,
+                last_n=n_ss_views,
             )
-            input_loss_metrics = self.loss_computer(rendered_input, input.image[:, -self.config.model.ttt.n_ss_inputs:, ...])
+            input_loss_metrics = self.loss_computer(rendered_input, input.image[:, -n_ss_views:, ...])
             layer_metrics["input_loss"] = input_loss_metrics["loss"].item()
 
         # render target views and compute target loss
@@ -732,7 +732,7 @@ class Images2LatentScene(nn.Module):
                 log_abs_grad_s = torch.log(torch.abs(grad_s) + 1e-10)
                 # adding a bias term to make the output around -2 before sigmoid, the learning rate will be around 0.1-0.2 at the beginning.
                 # This makes the residual update smaller at the beginning while maintaining relatively big gradient for the lrnet.
-                state_lr = torch.sigmoid(lrnet(log_abs_grad_s) - self.config.model.ttt.state_lr_init) # [b, n_latent_vectors, d]
+                state_lr = torch.sigmoid(lrnet(log_abs_grad_s) + self.config.model.ttt.state_lr_init) # [b, n_latent_vectors, d]
             else:
                 # Use fixed state_lr from config
                 state_lr = self.config.model.ttt.state_lr
@@ -766,13 +766,26 @@ class Images2LatentScene(nn.Module):
         Args:
             input: Input data batch
             target: Target data batch
-            partial_encoded_latents: Latent tokens with only using the first n_encoder_inputs input views [b, n_latent_vectors, d]
-            full_encoded_latents: (Optional) Latent tokens with using all input views [b, n_latent_vectors, d]
         Returns:
             s: Updated latent tokens [b, n_latent_vectors, d]
             ttt_metrics: TTT metrics
         """
-        partial_encoded_latents, full_encoded_latents = self.encode(input)
+        ttt_metrics = {}
+
+        # sample input views and ss views used
+        n_encoder_views = random.randint(self.config.model.ttt.n_encoder_inputs_min, self.config.model.ttt.n_encoder_inputs_max)
+        n_ss_views = random.randint(self.config.model.ttt.n_ss_inputs_min, self.config.model.ttt.n_ss_inputs_max)
+        ttt_metrics["n_encoder_views"] = n_encoder_views
+        ttt_metrics["n_ss_views"] = n_ss_views
+
+        # sample ttt iterations per layer
+        if self.config.model.ttt.supervise_mode == "random_last":
+            n_iters = random.randint(self.config.model.ttt.min_layer, self.config.model.ttt.max_layer)
+        else:
+            n_iters = self.config.model.ttt.n_iters_per_layer
+        ttt_metrics["n_iters"] = n_iters
+
+        partial_encoded_latents, full_encoded_latents = self.encode(input, n_encoder_views)
         s = partial_encoded_latents
         if self.config.model.ttt.detach_s0:
             # If detach s0, the gradient will not flow into encoder, tokenizer and the register_token.
@@ -782,24 +795,18 @@ class Images2LatentScene(nn.Module):
         # iterate over layers and iterations
         input_pose_tokens = None
         target_pose_tokens = None
-        ttt_metrics = {'layers': []}
+        ttt_metrics["layers"] = []
+        
         losses = []
         for layer_idx in range(self.config.model.ttt.n_layer):
-            if self.config.model.ttt.supervise_mode == "random_last":
-                # if random_last, we randomly choose the number of iterations between [min_layer, max_layer]
-                max_iter = random.randint(self.config.model.ttt.min_layer, self.config.model.ttt.max_layer)
-            else:
-                max_iter = self.config.model.ttt.n_iters_per_layer
-            # print(f"[ttt_forward] loop for {max_iter} iterations")
-            
-            for iter_idx in range(max_iter):
+            for iter_idx in range(n_iters):
                 # input: always need gradient -- We need to calculate gradient later.
                 # target:
                 # - training time: only when supervise average need gradient.
                 # - inference time: no need gradient.
                 s = s.requires_grad_(True)
                 decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, loss_metrics, input_pose_tokens, target_pose_tokens, _, _ = self._compute_ttt_loss(
-                    s, input, target, full_encoded_latents, input_pose_tokens, target_pose_tokens,
+                    s, input, target, n_ss_views, full_encoded_latents, input_pose_tokens, target_pose_tokens,
                     input_need_grad=True,
                     target_need_grad=self.config.model.ttt.supervise_mode == "average" and self.config.training.supervision == "target" and not self.config.inference.if_inference,
                 )
@@ -825,14 +832,14 @@ class Images2LatentScene(nn.Module):
                 # inference time: always dont keep tracking gradients
                 s, update_metrics = self._update_state_with_loss(
                     s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], lrnet,
-                    need_grad=(not self.config.model.ttt.detach_middle or (iter_idx == max_iter - 1)) and not self.config.inference.if_inference,
+                    need_grad=(not self.config.model.ttt.detach_middle or (iter_idx == n_iters - 1)) and not self.config.inference.if_inference,
                 )
                 
                 # Merge metrics
                 layer_metrics = {**loss_metrics, **update_metrics}
                 ttt_metrics['layers'].append(layer_metrics)
 
-                if self.config.model.ttt.detach_middle and (iter_idx != max_iter - 1):
+                if self.config.model.ttt.detach_middle and (iter_idx != n_iters - 1):
                     s = s.detach()
 
                 # debug: print the memory usage after each update
@@ -842,7 +849,7 @@ class Images2LatentScene(nn.Module):
         # input: dont need gradient unless supervise input at training time
         # target: always need gradient if supervise target at training time.
         decoder_input, last_input_loss_metrics, last_target_loss_metrics, last_distillation_loss, last_layer_metrics, _, _, _, rendered_target = self._compute_ttt_loss(
-            s, input, target, full_encoded_latents, 
+            s, input, target, n_ss_views, full_encoded_latents, 
             input_pose_tokens=None, 
             target_pose_tokens=target_pose_tokens, 
             compute_target_loss=True,
@@ -896,7 +903,7 @@ class Images2LatentScene(nn.Module):
 
         if s is None:
             assert layer_idx == 0 and iter_idx == 0, "layer_idx and iter_idx must be 0 for G3R supervision when s is not provided"
-            partial_encoded_latents, full_encoded_latents = self.encode(input)
+            partial_encoded_latents, full_encoded_latents = self.encode(input, n_encoder_views)
             s = partial_encoded_latents
         
         if self.config.model.ttt.detach_s0:
@@ -906,7 +913,7 @@ class Images2LatentScene(nn.Module):
 
         # Compute self-supervision losses
         decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, loss_metrics, input_pose_tokens, target_pose_tokens, rendered_input, rendered_target = self._compute_ttt_loss(
-            s, input, target, full_encoded_latents, input_pose_tokens, target_pose_tokens
+            s, input, target, n_ss_views, full_encoded_latents, input_pose_tokens, target_pose_tokens
         )
         
         # Update state with self-supervision losses if update is True
