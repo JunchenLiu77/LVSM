@@ -121,7 +121,10 @@ def export_results(
     rendered_input,
     rendered_target,
     out_dir: str, 
-    compute_metrics: bool = False
+    compute_metrics: bool = False,
+    n_encoder_views: int = None,
+    n_ss_views: int = None,
+    n_iters: int = None,
 ):
     """
     Save results including images and optional metrics and videos.
@@ -145,7 +148,7 @@ def export_results(
         target_indices = target.index[batch_idx, :, 0].cpu().numpy()
         
         # Save images
-        _save_images(input, target, rendered_input, rendered_target, batch_idx, sample_dir)
+        _save_images(input, target, rendered_input, rendered_target, batch_idx, sample_dir, n_encoder_views, n_ss_views, n_iters)
         
         # Compute and save metrics if requested
         if compute_metrics:
@@ -157,7 +160,10 @@ def export_results(
                 input_indices,
                 target_indices,
                 sample_dir,
-                scene_name
+                scene_name,
+                n_encoder_views,
+                n_ss_views,
+                n_iters
             )
         
         # Save video if available
@@ -222,14 +228,15 @@ def visualize_intermediate_results(out_dir, input, target, rendered_input, rende
     )
 
 
-def _save_images(input, target, rendered_input, rendered_target, batch_idx, out_dir):
+def _save_images(input, target, rendered_input, rendered_target, batch_idx, out_dir, n_encoder_views=None, n_ss_views=None, n_iters=None):
     """Save visualization images."""
     # Save input image
     # input_img = input.image[batch_idx]
     # input_img = rearrange(input_img, "v c h w -> h (v w) c")
     # input_img = (input_img.cpu().numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
     # Image.fromarray(input_img).save(os.path.join(out_dir, "input.png"))
-
+    prefix = f"{n_encoder_views}enc{n_ss_views}ss_{n_iters}iters_" if (n_encoder_views is not None and n_ss_views is not None and n_iters is not None) else ""
+    
     # Save GT input vs rendered input side-by-side
     comparison = torch.cat(
         (input.image[batch_idx], rendered_input[batch_idx]), 
@@ -237,7 +244,7 @@ def _save_images(input, target, rendered_input, rendered_target, batch_idx, out_
     ).detach().cpu()
     comparison = rearrange(comparison, "v c h w -> h (v w) c")
     comparison = (comparison.numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
-    Image.fromarray(comparison).save(os.path.join(out_dir, "gt_vs_pred_input.png"))
+    Image.fromarray(comparison).save(os.path.join(out_dir, f"{prefix}input.png"))
 
     # Save GT target vs rendered target side-by-side
     comparison = torch.cat(
@@ -246,10 +253,10 @@ def _save_images(input, target, rendered_input, rendered_target, batch_idx, out_
     ).detach().cpu()
     comparison = rearrange(comparison, "v c h w -> h (v w) c")
     comparison = (comparison.numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
-    Image.fromarray(comparison).save(os.path.join(out_dir, "gt_vs_pred_target.png"))
+    Image.fromarray(comparison).save(os.path.join(out_dir, f"{prefix}target.png"))
     
 
-def _save_metrics(input, target, rendered_input, rendered_target, input_indices, target_indices, out_dir, scene_name):
+def _save_metrics(input, target, rendered_input, rendered_target, input_indices, target_indices, out_dir, scene_name, n_encoder_views=None, n_ss_views=None, n_iters=None):
     n_input_views = rendered_input.size(0)
     n_target_views = rendered_target.size(0)
     input = input.to(torch.float32)
@@ -299,7 +306,8 @@ def _save_metrics(input, target, rendered_input, rendered_target, input_indices,
         })
     
     # Save metrics to a single JSON file
-    with open(os.path.join(out_dir, "metrics.json"), "w") as f:
+    prefix = f"{n_encoder_views}enc{n_ss_views}ss_{n_iters}iters_" if (n_encoder_views is not None and n_ss_views is not None and n_iters is not None) else ""
+    with open(os.path.join(out_dir, f"{prefix}metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
 
 
@@ -317,7 +325,7 @@ def _save_video(frames, out_dir):
     )
 
 
-def summarize_evaluation(evaluation_folder):
+def summarize_evaluation(evaluation_folder, n_encoder_views=None, n_ss_views=None, n_iters=None):
     # Find and sort all valid subfolders
     subfolders = sorted(
         [
@@ -330,9 +338,9 @@ def summarize_evaluation(evaluation_folder):
 
     metrics = {}
     valid_subfolders = []
-    
+    prefix = f"{n_encoder_views}enc{n_ss_views}ss_{n_iters}iters_" if (n_encoder_views is not None and n_ss_views is not None and n_iters is not None) else ""
     for subfolder in subfolders:
-        json_path = os.path.join(subfolder, "metrics.json")
+        json_path = os.path.join(subfolder, f"{prefix}metrics.json")
         if not os.path.exists(json_path):
             print(f"!!! Metrics file not found in {subfolder}, skipping...")
             continue
@@ -354,7 +362,7 @@ def summarize_evaluation(evaluation_folder):
         print(f"No valid metrics files found in {evaluation_folder}")
         return
 
-    csv_file = os.path.join(evaluation_folder, "summary.csv")
+    csv_file = os.path.join(evaluation_folder, f"{prefix}summary.csv")
     with open(csv_file, "w") as f:
         header = ["Index"] + list(metrics.keys())
         f.write(",".join(header) + "\n")
@@ -366,8 +374,12 @@ def summarize_evaluation(evaluation_folder):
         
         f.write("\n")
         
-        averages = [str(sum(values) / len(values)) for values in metrics.values()]
-        f.write(f"average,{','.join(averages)}\n")
+        averages = [sum(values) / len(values) for values in metrics.values()]
+        averages_str = [f"{avg:.4f}" for avg in averages]
+        f.write(f"average,{','.join(averages_str)}\n")
     
     print(f"Summary written to {csv_file}")
-    print(f"Average: {','.join(f'{float(avg):.4f}' for avg in averages)}")
+    print(f"{prefix}Average: {','.join(averages_str)}")
+
+    # input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim
+    return averages[0], averages[1], averages[2], averages[3], averages[4], averages[5]

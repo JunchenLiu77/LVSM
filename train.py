@@ -10,7 +10,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 import torch.distributed as dist
 from setup import init_config, init_distributed, init_wandb_and_backup
-from utils.metric_utils import visualize_intermediate_results
+from utils.metric_utils import visualize_intermediate_results, summarize_evaluation, export_results
 
 # Mute noisy warnings/logs from torch.compile/inductor
 import warnings
@@ -50,40 +50,82 @@ amp_dtype_mapping = {
     'tf32': torch.float32
 }
 
+is_ttt = "ttt" in config.model.class_name
+
 # Load dataset
 dataset_name = config.training.get("dataset_name", "data.dataset.Dataset")
 module, class_name = dataset_name.rsplit(".", 1)
 Dataset = importlib.import_module(module).__dict__[class_name]
-dataset = Dataset(config)
-batch_size_per_gpu = config.training.batch_size_per_gpu
 
-datasampler = DistributedSampler(dataset)
-dataloader = DataLoader(
-    dataset,
-    batch_size=batch_size_per_gpu,
+# training set
+train_set = Dataset(
+    config, 
+    dataset_path="/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/train/full_list.txt", 
+    num_input_views=config.training.num_input_views, 
+    num_target_views=config.training.num_target_views, 
+    inference=False
+)
+train_sampler = DistributedSampler(train_set)
+train_loader = DataLoader(
+    train_set,
+    batch_size=config.training.batch_size_per_gpu,
     shuffle=False,
     num_workers=config.training.num_workers,
     persistent_workers=True,
     pin_memory=False,
     drop_last=True,
     prefetch_factor=config.training.prefetch_factor,
-    sampler=datasampler,
+    sampler=train_sampler,
 )
-dataloader_iter = iter(dataloader)
+train_loader_iter = iter(train_loader)
+
+if config.training.test_every > 0:
+    # test set, use sampler to keep align with LVSM official testset sampling
+    test_set = Dataset(
+        config, 
+        dataset_path="/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/test/full_list.txt", 
+        num_input_views=2, 
+        num_target_views=3, 
+        inference=True
+    )
+    test_sampler = DistributedSampler(test_set)
+    test_loader = DataLoader(
+        test_set,
+        batch_size=config.training.test_batch_size_per_gpu,
+        shuffle=False,
+        num_workers=config.training.num_workers,
+        persistent_workers=True,
+        pin_memory=False,
+        drop_last=True,
+        prefetch_factor=config.training.prefetch_factor,
+        sampler=test_sampler,
+    )
+    test_sampler.set_epoch(0)
+
+    if is_ttt:
+        enc_views, ss_views = [], []
+        iters = config.training.test_layers
+        if config.training.test_1enc1ss:
+            enc_views.append(1)
+            ss_views.append(1)
+        if config.training.test_2enc2ss:
+            enc_views.append(2)
+            ss_views.append(2)
+        assert len(enc_views) > 0 and len(ss_views) > 0 and len(iters) > 0, "At least one test setting should be specified"
+
 
 total_train_steps = config.training.train_steps
 grad_accum_steps = config.training.grad_accum_steps
 total_param_update_steps = total_train_steps
 total_train_steps = total_train_steps * grad_accum_steps # real train steps when using gradient accumulation
-total_batch_size = batch_size_per_gpu * ddp_info.world_size * grad_accum_steps
-total_num_epochs = int(total_param_update_steps * total_batch_size / len(dataset))
+total_batch_size = config.training.batch_size_per_gpu * ddp_info.world_size * grad_accum_steps
+total_num_epochs = int(total_param_update_steps * total_batch_size / len(train_set))
 
 
 module, class_name = config.model.class_name.rsplit(".", 1)
 LVSM = importlib.import_module(module).__dict__[class_name]
 model = LVSM(config).to(ddp_info.device)
 model = DDP(model, device_ids=[ddp_info.local_rank], find_unused_parameters=True)
-is_ttt = "ttt" in module
 
 
 optimizer, optimized_param_dict, all_param_dict = create_optimizer(
@@ -162,18 +204,18 @@ model.train()
 
 while cur_train_step <= total_train_steps:
     tic = time.time()
-    cur_epoch = int(cur_train_step * (total_batch_size / grad_accum_steps) // len(dataset) )
+    cur_epoch = int(cur_train_step * (total_batch_size / grad_accum_steps) // len(train_set) )
     try:
         # if start_train_step == cur_train_step:
-        #     print(f"Current Rank {ddp_info.local_rank} Restarting training from step {cur_train_step}. Resetting dataloader epoch to {cur_epoch}; might take a while...")
-        #     datasampler.set_epoch(cur_epoch)
-        #     dataloader_iter = iter(dataloader)
-        data = next(dataloader_iter)
+        #     print(f"Current Rank {ddp_info.local_rank} Restarting training from step {cur_train_step}. Resetting train_loader epoch to {cur_epoch}; might take a while...")
+        #     train_sampler.set_epoch(cur_epoch)
+        #     train_loader_iter = iter(train_loader)
+        data = next(train_loader_iter)
     except StopIteration:
-        print(f"Current Rank {ddp_info.local_rank} Ran out of data. Resetting dataloader epoch to {cur_epoch}; might take a while...")
-        datasampler.set_epoch(cur_epoch)
-        dataloader_iter = iter(dataloader)
-        data = next(dataloader_iter)
+        print(f"Current Rank {ddp_info.local_rank} Ran out of data. Resetting train_loader epoch to {cur_epoch}; might take a while...")
+        train_sampler.set_epoch(cur_epoch)
+        train_loader_iter = iter(train_loader)
+        data = next(train_loader_iter)
 
     batch = {k: v.to(ddp_info.device) if type(v) == torch.Tensor else v for k, v in data.items()}
 
@@ -207,6 +249,8 @@ while cur_train_step <= total_train_steps:
                 
                 input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics = model(
                     batch,
+                    num_input_views=config.training.num_input_views,
+                    num_target_views=config.training.num_target_views,
                     has_target_image=True,
                     layer_idx=layer_idx,
                     iter_idx=iter_idx,
@@ -232,7 +276,13 @@ while cur_train_step <= total_train_steps:
                     if config.model.ttt.distill_factor > 0.0:
                         ttt_metrics["last_distillation_loss"] = last_layer_metrics["distillation_loss"]
             else:
-                input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(batch)
+                input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
+                    batch,
+                    num_input_views=config.training.num_input_views,
+                    num_target_views=config.training.num_target_views,
+                    has_target_image=True,
+                    target_has_input=config.training.target_has_input,
+                )
 
         update_grads = (cur_train_step + 1) % grad_accum_steps == 0 or cur_train_step == total_train_steps
         
@@ -408,7 +458,76 @@ while cur_train_step <= total_train_steps:
             torch.cuda.empty_cache()
             model.train()
 
-            
+    # test on multiple nodes
+    if config.training.test_every > 0 and (cur_train_step % config.training.test_every == 0 or cur_train_step == 1):
+        export_inter_results = True
+        print_rank0(f"Running inference at step {cur_train_step}")
+        out_dir = os.path.join(config.training.checkpoint_dir, f"iter_{cur_train_step:08d}_inference")
+        os.makedirs(out_dir, exist_ok=True)
+        assert not (is_ttt and config.model.ttt.supervise_mode == "g3r"), "TTT with G3R supervision is not supported for testing"
+        
+        # instantiate a new iterator every time we test
+        test_loader_iter = iter(test_loader)
+        with torch.no_grad(), torch.autocast(
+            enabled=config.training.use_amp,
+            device_type="cuda",
+            dtype=amp_dtype_mapping[config.training.amp_dtype],
+        ):
+            for (idx, batch) in enumerate(test_loader_iter):
+                print(f"[Rank {ddp_info.local_rank}] Running inference on the {idx}th batch")
+                if config.inference.get("first_n_batches", None) is not None and idx >= config.inference.get("first_n_batches", None):
+                    break
+                batch = {k: v.to(ddp_info.device) if type(v) == torch.Tensor else v for k, v in batch.items()}
+                if is_ttt:
+                    for n_iters in iters:
+                        for i in range(len(enc_views)):
+                            n_encoder_views = enc_views[i]
+                            n_ss_views = ss_views[i]
+                            input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
+                                batch,
+                                num_input_views=2,
+                                num_target_views=3,
+                                n_encoder_views=n_encoder_views,
+                                n_ss_views=n_ss_views,
+                                n_iters=n_iters,
+                                has_target_image=True,
+                                target_has_input=False,
+                            )
+                            export_results(input, target, rendered_input, rendered_target, out_dir, compute_metrics=config.inference.get("compute_metrics"), n_encoder_views=n_encoder_views, n_ss_views=n_ss_views, n_iters=n_iters)
+                            del input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
+                            torch.cuda.empty_cache()
+                else:
+                    input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
+                        batch,
+                        num_input_views=2,
+                        num_target_views=3,
+                        has_target_image=True,
+                        target_has_input=False,
+                    )
+                    export_results(input, target, rendered_input, rendered_target, out_dir, compute_metrics=config.inference.get("compute_metrics"))
+                    del input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
+                    torch.cuda.empty_cache()
+            dist.barrier()
+            if ddp_info.is_main_process and config.inference.get("compute_metrics", False):
+                if is_ttt:
+                    for n_iters in iters:
+                        for i in range(len(enc_views)):
+                            n_encoder_views = enc_views[i]
+                            n_ss_views = ss_views[i]
+                            input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim = summarize_evaluation(out_dir, n_encoder_views=n_encoder_views, n_ss_views=n_ss_views, n_iters=n_iters)
+                            
+                            # log results in wandb
+                            test_name = f"test_{n_encoder_views}enc{n_ss_views}ss_{n_iters}iters"
+                            wandb.log({
+                                f"{test_name}/input_psnr": input_psnr,
+                                f"{test_name}/input_lpips": input_lpips,
+                                f"{test_name}/input_ssim": input_ssim,
+                                f"{test_name}/target_psnr": target_psnr,
+                                f"{test_name}/target_lpips": target_lpips,
+                                f"{test_name}/target_ssim": target_ssim,
+                            }, step=cur_train_step)
+                else:
+                    input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim = summarize_evaluation(out_dir)
     if export_inter_results:
         torch.cuda.empty_cache()
         dist.barrier()

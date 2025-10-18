@@ -13,21 +13,23 @@ import torch.nn.functional as F
 
 
 class Dataset(Dataset):
-    def __init__(self, config):
+    def __init__(self, config, dataset_path, num_input_views, num_target_views, inference=False):
         super().__init__()
         self.config = config
 
         try:
-            with open(self.config.training.dataset_path, 'r') as f:
+            with open(dataset_path, 'r') as f:
                 self.all_scene_paths = f.read().splitlines()
             self.all_scene_paths = [path for path in self.all_scene_paths if path.strip()]
         
         except Exception as e:
-            print(f"Error reading dataset paths from '{self.config.training.dataset_path}'")
+            print(f"Error reading dataset paths from '{dataset_path}'")
             raise e
         
 
-        self.inference = self.config.inference.get("if_inference", False)
+        self.num_input_views = num_input_views
+        self.num_target_views = num_target_views
+        self.inference = inference
         # Load file that specifies the input and target view indices to use for inference
         if self.inference:
             self.view_idx_list = dict()
@@ -131,7 +133,7 @@ class Dataset(Dataset):
         return in_c2ws
 
     def view_selector(self, frames):
-        if len(frames) < self.config.training.num_input_views + self.config.training.num_target_views:
+        if len(frames) < self.num_input_views + self.num_target_views:
             return None
         # sample view candidates
         view_selector_config = self.config.training.view_selector
@@ -144,7 +146,7 @@ class Dataset(Dataset):
             return None
         start_frame = random.randint(0, len(frames) - frame_dist - 1)
         end_frame = start_frame + frame_dist
-        sampled_frames = random.sample(range(start_frame + 1, end_frame), self.config.training.num_input_views + self.config.training.num_target_views - 2)
+        sampled_frames = random.sample(range(start_frame + 1, end_frame), self.num_input_views + self.num_target_views - 2)
         
         # JC: always use two input views, which are the first two in returned list.
         image_indices = [start_frame, end_frame] + sampled_frames
@@ -159,14 +161,14 @@ class Dataset(Dataset):
 
         if self.inference and scene_name in self.view_idx_list:
             current_view_idx = self.view_idx_list[scene_name]
-            assert self.config.training.num_input_views >= len(current_view_idx["context"]), f"We have {len(current_view_idx["context"])} context views, but we want to select {self.config.training.num_input_views} input views."
-            assert self.config.training.num_target_views == len(current_view_idx["target"]), f"For now we expect the number of target views to be the same as the number of target views in the index file."
+            assert self.num_input_views >= len(current_view_idx["context"]), f"We have {len(current_view_idx["context"])} context views, but we want to select {self.num_input_views} input views."
+            assert self.num_target_views == len(current_view_idx["target"]), f"For now we expect the number of target views to be the same as the number of target views in the index file."
             context_indices = current_view_idx["context"]
             target_indices = current_view_idx["target"]
             
-            if self.config.training.num_input_views > len(current_view_idx["context"]):
+            if self.num_input_views > len(current_view_idx["context"]):
                 # randomly sample extra input views in between context views
-                n_extra_input_views = self.config.training.num_input_views - len(context_indices)
+                n_extra_input_views = self.num_input_views - len(context_indices)
                 candidates = list(range(len(frames)))
                 candidates = [i for i in candidates if i not in context_indices and i not in target_indices and i > context_indices[0] and i < context_indices[-1]]
                 if len(candidates) < n_extra_input_views:

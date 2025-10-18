@@ -124,6 +124,13 @@ training:
   checkpoint_every: 5000
   log_grad_norm_details: false
 
+  # test
+  test_every: -1
+  test_1enc1ss: false
+  test_2enc2ss: false
+  test_layers: []
+  test_batch_size_per_gpu: 8
+
   # freeze parameters
   freeze_encoder: false
   freeze_decoder: false

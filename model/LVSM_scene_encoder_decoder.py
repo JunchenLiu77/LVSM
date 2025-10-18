@@ -281,8 +281,8 @@ class Images2LatentScene(nn.Module):
         return rendered_target
 
 
-    def forward(self, data_batch, has_target_image=True):
-        input, target = self.process_data(data_batch, has_target_image=has_target_image, target_has_input = self.config.training.target_has_input, compute_rays=True)
+    def forward(self, data_batch, num_input_views, num_target_views, has_target_image=True, target_has_input=False):
+        input, target = self.process_data(data_batch, num_input_views=num_input_views, num_target_views=num_target_views, has_target_image=has_target_image, target_has_input=target_has_input, compute_rays=True)
         
         # encode input views
         latent_tokens = self.encode(input) # [b, n_latent_vectors, d]

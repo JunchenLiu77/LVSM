@@ -81,7 +81,7 @@ class ProcessData(nn.Module):
 
         return ray_o, ray_d
     
-    def fetch_views(self, data_batch, has_target_image=True, target_has_input=True):
+    def fetch_views(self, data_batch, num_input_views, num_target_views, has_target_image=True, target_has_input=True):
         """
         Splits the input data batch into input and target sets.
         
@@ -97,16 +97,15 @@ class ProcessData(nn.Module):
             tuple: (input_dict, target_dict), both as EasyDict objects.
 
         """
-        # randomize input views if dynamic_input_view_num is True and not in inference mode
-        if (self.config.training.get("dynamic_input_view_num", False) 
-            and (not self.config.inference.get("if_inference", False))):
-            self.config.training.num_input_views = np.random.randint(2, 5)
-        
+        # # randomize input views if dynamic_input_view_num is True and not in inference mode
+        # if (self.config.training.get("dynamic_input_view_num", False) 
+        #     and (not self.config.inference.get("if_inference", False))):
+        #     num_input_views = np.random.randint(2, 5)
 
         input_dict, target_dict = {}, {}
         # index = [] save for future use if we want to select specific views
 
-        num_target_views, num_views, bs = self.config.training.num_target_views, data_batch["c2w"].size(1), data_batch["image"].size(0)
+        num_views, bs = data_batch["c2w"].size(1), data_batch["image"].size(0)
         assert num_target_views < num_views, f"We have {num_views} views, but we want to select {num_target_views} target views. This is more than the total number of views we have."
         
         # Decide the target view indices
@@ -118,7 +117,7 @@ class ProcessData(nn.Module):
             ], dtype=torch.long, device=data_batch["image"].device) # [b, num_target_views]
         else:
             index = torch.tensor([
-                [self.config.training.num_input_views + self.config.training.num_target_views - 1 - j for j in range(num_target_views)]
+                [num_input_views + num_target_views - 1 - j for j in range(num_target_views)]
                 for _ in range(bs)
             ], dtype=torch.long, device=data_batch["image"].device)
             index = torch.sort(index, dim=1).values # [b, num_target_views]
@@ -128,7 +127,7 @@ class ProcessData(nn.Module):
                 input_dict[key] = value
                 target_dict[key] = value
                 continue
-            input_dict[key] = value[:, :self.config.training.num_input_views, ...]
+            input_dict[key] = value[:, :num_input_views, ...]
 
             to_expand_dim = value.shape[2:] # [b, v, (value dim)] -> [value dim], e.g. [c, h, w] or [4] or [4, 4]
             expanded_index = index.view(index.shape[0], index.shape[1], *(1,) * len(to_expand_dim)).expand(-1, -1, *to_expand_dim)
@@ -151,7 +150,7 @@ class ProcessData(nn.Module):
 
     
     @torch.no_grad()
-    def forward(self, data_batch, has_target_image=True, target_has_input=True, compute_rays=True):
+    def forward(self, data_batch, num_input_views, num_target_views, has_target_image=True, target_has_input=True, compute_rays=True):
         """
         Preprocesses the input data batch and (optionally) computes ray_o and ray_d.
 
@@ -173,7 +172,7 @@ class ProcessData(nn.Module):
                 - 'ray_d' (torch.Tensor): Shape [b, v, 3, h, w]
                 - 'image_h_w' (tuple): (height, width)
         """
-        input_dict, target_dict = self.fetch_views(data_batch, has_target_image=has_target_image, target_has_input=target_has_input)
+        input_dict, target_dict = self.fetch_views(data_batch, num_input_views=num_input_views, num_target_views=num_target_views, has_target_image=has_target_image, target_has_input=target_has_input)
 
         if compute_rays:
             for dict in [input_dict, target_dict]:

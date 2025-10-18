@@ -308,6 +308,7 @@ class Images2LatentScene(nn.Module):
                             use_qk_norm=True,
                             use_positional_encoding=self.config.model.ttt.use_positional_encoding
                         ) for _ in range(self.config.model.ttt.n_blocks_per_layer)],
+                        nn.Linear(self.config.model.transformer.d, self.config.model.transformer.d, bias=False),
                     )
                 )
                 print(f"Initialized TTT blocks as a simple MLP and {self.config.model.ttt.n_blocks_per_layer} transformer blocks")
@@ -342,6 +343,11 @@ class Images2LatentScene(nn.Module):
         # initialize ttt blocks weights
         for block in self.ttt_blocks:
             block.apply(init_weights)
+            nn.init.zeros_(block[-1].weight)
+            # init the last layer of the ttt blocks to be all zeros, so that the model is a residual connection
+            # for i in range(1, self.config.model.ttt.n_blocks_per_layer + 1):
+            #     nn.init.zeros_(block[-i].attn.fc.weight)
+            #     nn.init.zeros_(block[-i].mlp.mlp[-2].weight)
 
 
     def train(self, mode=True):
@@ -760,7 +766,7 @@ class Images2LatentScene(nn.Module):
         return s, layer_metrics
 
 
-    def ttt_forward(self, input, target):
+    def ttt_forward(self, input, target, n_encoder_views=None, n_ss_views=None, n_iters=None):
         """
         Update the latent tokens with the TTT blocks. Returns the updated state and TTT metrics for logging.
         Args:
@@ -773,16 +779,16 @@ class Images2LatentScene(nn.Module):
         ttt_metrics = {}
 
         # sample input views and ss views used
-        n_encoder_views = random.randint(self.config.model.ttt.n_encoder_inputs_min, self.config.model.ttt.n_encoder_inputs_max)
-        n_ss_views = random.randint(self.config.model.ttt.n_ss_inputs_min, self.config.model.ttt.n_ss_inputs_max)
+        n_encoder_views = random.randint(self.config.model.ttt.n_encoder_inputs_min, self.config.model.ttt.n_encoder_inputs_max) if n_encoder_views is None else n_encoder_views
+        n_ss_views = random.randint(self.config.model.ttt.n_ss_inputs_min, self.config.model.ttt.n_ss_inputs_max) if n_ss_views is None else n_ss_views
         ttt_metrics["n_encoder_views"] = n_encoder_views
         ttt_metrics["n_ss_views"] = n_ss_views
 
         # sample ttt iterations per layer
         if self.config.model.ttt.supervise_mode == "random_last":
-            n_iters = random.randint(self.config.model.ttt.min_layer, self.config.model.ttt.max_layer)
+            n_iters = random.randint(self.config.model.ttt.min_layer, self.config.model.ttt.max_layer) if n_iters is None else n_iters
         else:
-            n_iters = self.config.model.ttt.n_iters_per_layer
+            n_iters = self.config.model.ttt.n_iters_per_layer if n_iters is None else n_iters
         ttt_metrics["n_iters"] = n_iters
 
         partial_encoded_latents, full_encoded_latents = self.encode(input, n_encoder_views)
@@ -943,14 +949,14 @@ class Images2LatentScene(nn.Module):
         return input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics
 
 
-    def forward(self, data_batch, has_target_image=True, layer_idx=None, iter_idx=None, **kwargs):
+    def forward(self, data_batch, num_input_views, num_target_views, has_target_image=True, target_has_input=False, layer_idx=None, iter_idx=None, n_encoder_views=None, n_ss_views=None, n_iters=None, **kwargs):
         assert has_target_image, "JC: we might need to support this?"
         if kwargs.get("input") is None or kwargs.get("target") is None:
             if "input" in kwargs:
                 kwargs.pop("input")
             if "target" in kwargs:
                 kwargs.pop("target")
-            input, target = self.process_data(data_batch, has_target_image=has_target_image, target_has_input = self.config.training.target_has_input, compute_rays=True)
+            input, target = self.process_data(data_batch, num_input_views=num_input_views, num_target_views=num_target_views, has_target_image=has_target_image, target_has_input=target_has_input, compute_rays=True)
         else:
             input, target = kwargs.pop("input"), kwargs.pop("target")
         
@@ -958,7 +964,7 @@ class Images2LatentScene(nn.Module):
             assert layer_idx is not None and iter_idx is not None, "layer_idx and iter_idx must be provided for G3R supervision"
             return self.ttt_forward_g3r(input, target, layer_idx, iter_idx, **kwargs)
         else:    
-            return self.ttt_forward(input, target)
+            return self.ttt_forward(input, target, n_encoder_views, n_ss_views, n_iters)
 
 
     @torch.no_grad()
