@@ -215,6 +215,8 @@ class Generator:
             overrides.append(f'training.reset_training_state=false')
         if args.exp_name is not None:
             overrides.append(f'training.wandb_exp_name="{args.exp_name}"')
+        if args.scheduler_type is not None:
+            overrides.append(f'training.scheduler_type={args.scheduler_type}')
 
         if args.freeze_encoder is not None and args.freeze_encoder:
             overrides.append('training.freeze_encoder=true')   
@@ -543,6 +545,8 @@ def main():
                         help='Enable gradient checkpointing')
     parser.add_argument('--no-grad-checkpoint', action='store_true', default=None,
                         help='Disable gradient checkpointing')
+    parser.add_argument('--scheduler-type', choices=['linear', 'cosine', 'constant'],
+                        help='Default scheduler type')
     parser.add_argument('--freeze-encoder', action='store_true', default=None,
                         help='Freeze encoder parameters (encoder-decoder-ttt)')
     parser.add_argument('--no-freeze-encoder', action='store_true', default=None,

@@ -84,8 +84,8 @@ if config.training.test_every > 0:
     test_set = Dataset(
         config, 
         dataset_path="/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/test/full_list.txt", 
-        num_input_views=2, 
-        num_target_views=3, 
+        num_input_views=2,
+        num_target_views=3,
         inference=True
     )
     test_sampler = DistributedSampler(test_set)
@@ -371,6 +371,8 @@ while cur_train_step <= total_train_steps:
             print_str += "\ninput: "
             for k, v in input_loss_dict.items():
                 print_str += f"{k}: {v:.6f} | "
+            if config.model.ttt.distill_factor > 0.0:
+                print_str += f"\ndistillation: {ttt_metrics['last_distillation_loss']:.6f}"
             print(print_str)
 
         # log in wandb
@@ -388,7 +390,9 @@ while cur_train_step <= total_train_steps:
             }
             log_dict.update({"train/target/" + k: v for k, v in target_loss_dict.items()})
             log_dict.update({"train/input/" + k: v for k, v in input_loss_dict.items()})
-
+            if config.model.ttt.distill_factor > 0.0:
+                log_dict["train/distillation"] = ttt_metrics["last_distillation_loss"]
+            
             # Add TTT metrics to logging
             if is_ttt:
                 if config.model.ttt.supervise_mode != "g3r":

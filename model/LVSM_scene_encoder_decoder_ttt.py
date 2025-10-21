@@ -537,6 +537,7 @@ class Images2LatentScene(nn.Module):
                 c=3
             )
             rendered_chunks.append(rendered_images)
+            # torch.cuda.empty_cache()
 
         rendered_images = torch.cat(rendered_chunks, dim=1)  # [b, v_target, c, H, W]
         return rendered_images, target_pose_tokens
@@ -606,7 +607,6 @@ class Images2LatentScene(nn.Module):
         # compute the distillation loss
         distillation_loss = None
         if self.config.model.ttt.distill_factor > 0.0:
-            raise NotImplementedError("check whether no_grad is needed here")
             assert full_encoded_latents is not None, "full_encoded_latents is required for distillation"
             distillation_loss = F.mse_loss(s, full_encoded_latents)
             layer_metrics["distillation_loss"] = distillation_loss.item()

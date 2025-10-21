@@ -38,8 +38,8 @@ Dataset = importlib.import_module(module).__dict__[class_name]
 dataset = Dataset(
     config, 
     dataset_path="/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/test/full_list.txt", 
-    num_input_views=2, 
-    num_target_views=3, 
+    num_input_views=config.training.num_input_views, 
+    num_target_views=config.training.num_target_views, 
     inference=True
 )
 
@@ -93,6 +93,11 @@ if is_ttt:
     if config.training.test_2enc2ss:
         enc_views.append(2)
         ss_views.append(2)
+    # hacky way to test 4 views encoder and 4 views ss
+    # enc_views.append(8)
+    # ss_views.append(8)
+    # enc_views.append(2)
+    # ss_views.append(30)
     assert len(enc_views) > 0 and len(ss_views) > 0 and len(iters) > 0, "At least one test setting should be specified"
 
 if config.inference.get("first_n_batches", None) is not None:
@@ -118,8 +123,8 @@ with torch.no_grad(), torch.autocast(
                     n_ss_views = ss_views[i]
                     input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
                         batch,
-                        num_input_views=2,
-                        num_target_views=3,
+                        num_input_views=config.training.num_input_views,
+                        num_target_views=config.training.num_target_views,
                         n_encoder_views=n_encoder_views,
                         n_ss_views=n_ss_views,
                         n_iters=n_iters,
@@ -132,8 +137,8 @@ with torch.no_grad(), torch.autocast(
         else:
             input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
                 batch,
-                num_input_views=2,
-                num_target_views=3,
+                num_input_views=config.training.num_input_views,
+                num_target_views=config.training.num_target_views,
                 has_target_image=True,
                 target_has_input=False,
             )
