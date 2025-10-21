@@ -5,6 +5,7 @@ import os
 import time
 import wandb
 import torch
+import random
 from rich import print
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
@@ -51,6 +52,9 @@ amp_dtype_mapping = {
 }
 
 is_ttt = "ttt" in config.model.class_name
+# g3r is not supported for gradient accumulation
+if config.model.ttt.supervise_mode == "g3r":
+    assert config.training.grad_accum_steps == 1, "Gradient accumulation is not supported for G3R supervision"
 
 # Load dataset
 dataset_name = config.training.get("dataset_name", "data.dataset.Dataset")
@@ -223,7 +227,6 @@ while cur_train_step <= total_train_steps:
     if is_ttt and config.model.ttt.supervise_mode == "g3r":
         # When we follow the G3R supervision manner, we backpropagate the supervision loss n times per data sample.
         n_iters = config.model.ttt.n_layer * config.model.ttt.n_iters_per_layer + 1
-        # doesn't have model parameter synchronization here, so we can use model.module directly
         input = None
         target = None
         s = None
@@ -231,6 +234,14 @@ while cur_train_step <= total_train_steps:
         input_pose_tokens = None
         target_pose_tokens = None
         ttt_metrics = {"layers": []}
+
+        # determine the number of encoder and ss views used
+        n_encoder_views = random.randint(config.model.ttt.n_encoder_inputs_min, config.model.ttt.n_encoder_inputs_max)
+        n_ss_views = random.randint(config.model.ttt.n_ss_inputs_min, config.model.ttt.n_ss_inputs_max)
+        ttt_metrics["n_encoder_views"] = n_encoder_views
+        ttt_metrics["n_ss_views"] = n_ss_views
+
+        ttt_metrics["n_iters"] = n_iters - 1 # only update for n_iters - 1 times
     
     for idx in range(n_iters):
         with torch.autocast(
@@ -242,15 +253,18 @@ while cur_train_step <= total_train_steps:
                 is_last = (idx == n_iters - 1)
                 layer_idx = idx // config.model.ttt.n_iters_per_layer
                 iter_idx = idx % config.model.ttt.n_iters_per_layer
-                # TODO: kinda hacky here
-                if is_last:
-                    layer_idx = config.model.ttt.n_layer - 1
-                    iter_idx = config.model.ttt.n_iters_per_layer - 1
+
+                if config.model.ttt.enable_unroll:
+                    current_input_loss = 1e10
+                    prev_s = None # this will be triggered by the first layer
                 
                 input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics = model(
                     batch,
                     num_input_views=config.training.num_input_views,
                     num_target_views=config.training.num_target_views,
+                    is_g3r=True,
+                    n_encoder_views=n_encoder_views,
+                    n_ss_views=n_ss_views,
                     has_target_image=True,
                     layer_idx=layer_idx,
                     iter_idx=iter_idx,
@@ -260,7 +274,9 @@ while cur_train_step <= total_train_steps:
                     full_encoded_latents=full_encoded_latents,
                     input_pose_tokens=input_pose_tokens,
                     target_pose_tokens=target_pose_tokens,
-                    update=not is_last
+                    is_last=is_last,
+                    current_input_loss=current_input_loss,
+                    prev_s=prev_s,
                 )
                 s = s.detach().requires_grad_(True)
                 full_encoded_latents = full_encoded_latents.detach() if full_encoded_latents is not None else None
@@ -280,6 +296,7 @@ while cur_train_step <= total_train_steps:
                     batch,
                     num_input_views=config.training.num_input_views,
                     num_target_views=config.training.num_target_views,
+                    is_g3r=False,
                     has_target_image=True,
                     target_has_input=config.training.target_has_input,
                 )
@@ -294,9 +311,6 @@ while cur_train_step <= total_train_steps:
             # Intermediate step - don't sync yet
             with model.no_sync():
                 scaler.scale(loss / grad_accum_steps).backward()
-        cur_train_step += 1
-
-        export_inter_results = ((cur_train_step-1) == start_train_step) or (cur_train_step % config.training.vis_every == 0)
 
         total_grad_norm = None
         if update_grads:
@@ -354,6 +368,9 @@ while cur_train_step <= total_train_steps:
             scaler.update()
             lr_scheduler.step()
             optimizer.zero_grad(set_to_none=True)
+
+    cur_train_step += 1
+    export_inter_results = ((cur_train_step-1) == start_train_step) or (cur_train_step % config.training.vis_every == 0)
 
     # log and save checkpoint
     if ddp_info.is_main_process:
@@ -468,7 +485,6 @@ while cur_train_step <= total_train_steps:
         print_rank0(f"Running inference at step {cur_train_step}")
         out_dir = os.path.join(config.training.checkpoint_dir, f"iter_{cur_train_step:08d}_inference")
         os.makedirs(out_dir, exist_ok=True)
-        assert not (is_ttt and config.model.ttt.supervise_mode == "g3r"), "TTT with G3R supervision is not supported for testing"
         
         # instantiate a new iterator every time we test
         test_loader_iter = iter(test_loader)
@@ -491,6 +507,7 @@ while cur_train_step <= total_train_steps:
                                 batch,
                                 num_input_views=2,
                                 num_target_views=3,
+                                is_g3r=False, # at inference time, whether using G3R supervision behaves the same.
                                 n_encoder_views=n_encoder_views,
                                 n_ss_views=n_ss_views,
                                 n_iters=n_iters,

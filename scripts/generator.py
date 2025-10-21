@@ -191,7 +191,9 @@ class Generator:
                 overrides.append(f'model.ttt.n_ss_inputs_max={args.n_ss_inputs_max}')
             if args.distill_factor is not None:
                 overrides.append(f'model.ttt.distill_factor={args.distill_factor}')
-                
+            if args.enable_unroll is not None and args.enable_unroll:
+                overrides.append('model.ttt.enable_unroll=true')
+        
         # Training configuration overrides
         if args.batch_size is not None:
             overrides.append(f'training.batch_size_per_gpu={args.batch_size}')
@@ -515,6 +517,8 @@ def main():
                         help='Maximum number of ss inputs (encoder-decoder-ttt)')
     parser.add_argument('--distill-factor', type=float,
                         help='Distillation factor (encoder-decoder-ttt)')
+    parser.add_argument('--enable-unroll', action='store_true', default=None,
+                        help='Enable unroll in TTT (encoder-decoder-ttt)')
     
     # Training configuration
     parser.add_argument('--batch-size', type=int,

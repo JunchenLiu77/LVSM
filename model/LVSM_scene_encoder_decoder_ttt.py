@@ -789,7 +789,6 @@ class Images2LatentScene(nn.Module):
             n_iters = random.randint(self.config.model.ttt.min_layer, self.config.model.ttt.max_layer) if n_iters is None else n_iters
         else:
             n_iters = self.config.model.ttt.n_iters_per_layer if n_iters is None else n_iters
-        ttt_metrics["n_iters"] = n_iters
 
         partial_encoded_latents, full_encoded_latents = self.encode(input, n_encoder_views)
         s = partial_encoded_latents
@@ -804,6 +803,10 @@ class Images2LatentScene(nn.Module):
         ttt_metrics["layers"] = []
         
         losses = []
+        if self.config.model.ttt.enable_unroll:
+            current_input_loss = 1e10
+            # prev_s = s # this will be triggered by the first layer
+        
         for layer_idx in range(self.config.model.ttt.n_layer):
             for iter_idx in range(n_iters):
                 # input: always need gradient -- We need to calculate gradient later.
@@ -816,6 +819,14 @@ class Images2LatentScene(nn.Module):
                     input_need_grad=True,
                     target_need_grad=self.config.model.ttt.supervise_mode == "average" and self.config.training.supervision == "target" and not self.config.inference.if_inference,
                 )
+                
+                # if the input loss is bigger, unroll the state
+                if input_loss_metrics["loss"] > current_input_loss:
+                    s = prev_s
+                    break # no longer update the state
+                else:
+                    current_input_loss = input_loss_metrics["loss"]
+                    prev_s = s
 
                 if self.config.model.ttt.supervise_mode == "average":
                     if self.config.training.supervision == "input":
@@ -851,6 +862,9 @@ class Images2LatentScene(nn.Module):
                 # debug: print the memory usage after each update
                 # print(f"[{layer_idx}, {iter_idx}]: allocated: {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached memory: {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
 
+        # if unroll is enabled, we count the number of iterations used
+        ttt_metrics["n_iters"] = iter_idx + 1 if n_iters > 0 else 0
+
         # Compute the last layer losses
         # input: dont need gradient unless supervise input at training time
         # target: always need gradient if supervise target at training time.
@@ -862,6 +876,12 @@ class Images2LatentScene(nn.Module):
             input_need_grad=self.config.training.supervision == "input" and not self.config.inference.if_inference,
             target_need_grad=self.config.training.supervision == "target" and not self.config.inference.if_inference,
         )
+        if self.config.model.ttt.enable_unroll:
+            if last_input_loss_metrics["loss"] > current_input_loss:
+                s = prev_s
+            else:
+                current_input_loss = last_input_loss_metrics["loss"]
+                prev_s = s
 
         if self.config.training.supervision == "input":
             loss = last_input_loss_metrics["loss"]
@@ -888,7 +908,7 @@ class Images2LatentScene(nn.Module):
         return input, target, last_input_loss_metrics, last_target_loss_metrics, last_distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
 
 
-    def ttt_forward_g3r(self, input, target, layer_idx, iter_idx, s=None, full_encoded_latents=None, input_pose_tokens=None, target_pose_tokens=None, update=True):
+    def ttt_forward_g3r(self, input, target, layer_idx, iter_idx, n_encoder_views, n_ss_views, s=None, full_encoded_latents=None, input_pose_tokens=None, target_pose_tokens=None, is_last=False, current_input_loss=None, prev_s=None):
         """
         Forward the latent tokens with the TTT blocks for G3R supervision. Returns the updated state and TTT metrics for logging.
         Args:
@@ -901,11 +921,13 @@ class Images2LatentScene(nn.Module):
             input_pose_tokens: (Optional) Cached pose tokens for input views
             target_pose_tokens: (Optional) Cached pose tokens for target views
             update: Whether to update the state
+            current_input_loss: (Optional) Current input loss
+            prev_s: (Optional) Previous state
         Returns:
             s: Updated latent tokens [b, n_latent_vectors, d]
         """
+        assert self.config.model.ttt.supervise_mode == "g3r", "supervise_mode must be g3r for G3R supervision"
         assert layer_idx is not None and iter_idx is not None, "layer_idx and iter_idx must be provided for G3R supervision"
-        raise NotImplementedError("check whether gradient in this case is needed")
 
         if s is None:
             assert layer_idx == 0 and iter_idx == 0, "layer_idx and iter_idx must be 0 for G3R supervision when s is not provided"
@@ -919,24 +941,34 @@ class Images2LatentScene(nn.Module):
 
         # Compute self-supervision losses
         decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, loss_metrics, input_pose_tokens, target_pose_tokens, rendered_input, rendered_target = self._compute_ttt_loss(
-            s, input, target, n_ss_views, full_encoded_latents, input_pose_tokens, target_pose_tokens
+            s, input, target, n_ss_views, full_encoded_latents, input_pose_tokens, target_pose_tokens,
+            input_need_grad=True,
+            target_need_grad=self.config.training.supervision == "target" and not self.config.inference.if_inference,
         )
+
+        # if the input loss is bigger, unroll the state
+        if input_loss_metrics["loss"] > current_input_loss:
+            s = prev_s
+        else:
+            current_input_loss = input_loss_metrics["loss"]
+            prev_s = s
         
-        # Update state with self-supervision losses if update is True
+        # Update state with self-supervision losses except for the last layer
         layer_metrics = loss_metrics
-        if update:
+        if not is_last:
             grad_norm = self.ttt_grad_normalizers[layer_idx]
             state_norm = self.ttt_state_normalizers[layer_idx]
             opt = self.ttt_blocks[layer_idx]
             lrnet = None
-            if self.config.model.ttt.state_lr_mode == "learnable":
+            if self.config.model.ttt.state_lr_mode in ["learnable", "adaptive", "adaptive_mlp"]:
                 lrnet = self.ttt_lrnet[layer_idx]
 
-            s, update_metrics = self._update_state_with_loss(s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], lrnet)
+            s, update_metrics = self._update_state_with_loss(s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], lrnet, need_grad=True)
             layer_metrics = {**loss_metrics, **update_metrics}
         else:
             # TODO: hacky replacing
             with torch.no_grad(), torch.autocast(enabled=self.config.training.use_amp, device_type="cuda", dtype=amp_dtype_mapping[self.config.training.amp_dtype]):
+            # with nullcontext():
                 rendered_input, _ = self.decode(input, decoder_input)
 
         if self.config.training.supervision == "input":
@@ -949,7 +981,7 @@ class Images2LatentScene(nn.Module):
         return input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics
 
 
-    def forward(self, data_batch, num_input_views, num_target_views, has_target_image=True, target_has_input=False, layer_idx=None, iter_idx=None, n_encoder_views=None, n_ss_views=None, n_iters=None, **kwargs):
+    def forward(self, data_batch, num_input_views, num_target_views, is_g3r, has_target_image=True, target_has_input=False, layer_idx=None, iter_idx=None, n_encoder_views=None, n_ss_views=None, n_iters=None, **kwargs):
         assert has_target_image, "JC: we might need to support this?"
         if kwargs.get("input") is None or kwargs.get("target") is None:
             if "input" in kwargs:
@@ -960,9 +992,9 @@ class Images2LatentScene(nn.Module):
         else:
             input, target = kwargs.pop("input"), kwargs.pop("target")
         
-        if self.config.model.ttt.supervise_mode == "g3r":
+        if is_g3r:
             assert layer_idx is not None and iter_idx is not None, "layer_idx and iter_idx must be provided for G3R supervision"
-            return self.ttt_forward_g3r(input, target, layer_idx, iter_idx, **kwargs)
+            return self.ttt_forward_g3r(input, target, layer_idx, iter_idx, n_encoder_views, n_ss_views, **kwargs)
         else:    
             return self.ttt_forward(input, target, n_encoder_views, n_ss_views, n_iters)
 

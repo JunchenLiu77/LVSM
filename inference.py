@@ -125,6 +125,7 @@ with torch.no_grad(), torch.autocast(
                         batch,
                         num_input_views=config.training.num_input_views,
                         num_target_views=config.training.num_target_views,
+                        is_g3r=False, # at inference time, whether using G3R supervision behaves the same.
                         n_encoder_views=n_encoder_views,
                         n_ss_views=n_ss_views,
                         n_iters=n_iters,

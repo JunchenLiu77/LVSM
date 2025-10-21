@@ -46,6 +46,7 @@ model:
     normalizer_type: rms_norm
     normalizer_affine: true
     normalizer_eps: 1e-10
+    enable_unroll: false
     n_encoder_inputs_min: 1
     n_encoder_inputs_max: 1
     n_ss_inputs_min: 1
