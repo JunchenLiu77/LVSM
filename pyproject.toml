@@ -7,6 +7,9 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy<2",
     "opencv-python>=4.11.0.86",
+    "torchvision>=0.23.0",
+    "torchviz>=0.0.3",
     "transformers>=4.56.1",
     "viser>=1.0.8",
+    "xformers>=0.0.32.post2",
 ]

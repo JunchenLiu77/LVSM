@@ -51,6 +51,8 @@ model:
     n_encoder_inputs_max: 1
     n_ss_inputs_min: 1
     n_ss_inputs_max: 1
+    progressive: false
+    warmup_steps: 5000 # progressively train the model with more iterations
     adam:
       lr: 1e-3
       beta1: 0.9

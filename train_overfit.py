@@ -85,36 +85,38 @@ train_loader_iter = iter(train_loader)
 
 if config.training.test_every > 0:
     # test set, use sampler to keep align with LVSM official testset sampling
-    test_set = Dataset(
-        config, 
-        dataset_path="/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/test/full_list.txt", 
-        num_input_views=2,
-        num_target_views=3,
-        inference=True
-    )
-    test_sampler = DistributedSampler(test_set)
-    test_loader = DataLoader(
-        test_set,
-        batch_size=config.training.test_batch_size_per_gpu,
-        shuffle=False,
-        num_workers=config.training.num_workers,
-        persistent_workers=True,
-        pin_memory=False,
-        drop_last=True,
-        prefetch_factor=config.training.prefetch_factor,
-        sampler=test_sampler,
-    )
-    test_sampler.set_epoch(0)
+    # test_set = Dataset(
+    #     config, 
+    #     dataset_path="/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/test/full_list.txt", 
+    #     num_input_views=2,
+    #     num_target_views=3,
+    #     inference=True
+    # )
+    # test_sampler = DistributedSampler(test_set)
+    # test_loader = DataLoader(
+    #     test_set,
+    #     batch_size=config.training.test_batch_size_per_gpu,
+    #     shuffle=False,
+    #     num_workers=config.training.num_workers,
+    #     persistent_workers=True,
+    #     pin_memory=False,
+    #     drop_last=True,
+    #     prefetch_factor=config.training.prefetch_factor,
+    #     sampler=test_sampler,
+    # )
+    # test_sampler.set_epoch(0)
 
     if is_ttt:
         enc_views, ss_views = [], []
         iters = config.training.test_layers
-        if config.training.test_1enc1ss:
-            enc_views.append(1)
-            ss_views.append(1)
-        if config.training.test_2enc2ss:
-            enc_views.append(2)
-            ss_views.append(2)
+        enc_views.append(1)
+        ss_views.append(1)
+        # if config.training.test_1enc1ss:
+        #     enc_views.append(1)
+        #     ss_views.append(1)
+        # if config.training.test_2enc2ss:
+        #     enc_views.append(2)
+        #     ss_views.append(2)
         assert len(enc_views) > 0 and len(ss_views) > 0 and len(iters) > 0, "At least one test setting should be specified"
 
 
@@ -206,20 +208,34 @@ dist.barrier()
 start_train_step = cur_train_step
 model.train()
 
+data = next(train_loader_iter)
+data = next(train_loader_iter) # this one is harder
+# data = next(train_loader_iter)
+# data = next(train_loader_iter)
+# data = next(train_loader_iter)
+# data = next(train_loader_iter)
+# data = next(train_loader_iter)
+# data = next(train_loader_iter)
+# data = next(train_loader_iter)
+# data = next(train_loader_iter)
+# data = next(train_loader_iter)
+# data = next(train_loader_iter)
+# data = next(train_loader_iter) # this one is ez
+
 while cur_train_step <= total_train_steps:
     tic = time.time()
     cur_epoch = int(cur_train_step * (total_batch_size / grad_accum_steps) // len(train_set) )
-    try:
-        # if start_train_step == cur_train_step:
-        #     print(f"Current Rank {ddp_info.local_rank} Restarting training from step {cur_train_step}. Resetting train_loader epoch to {cur_epoch}; might take a while...")
-        #     train_sampler.set_epoch(cur_epoch)
-        #     train_loader_iter = iter(train_loader)
-        data = next(train_loader_iter)
-    except StopIteration:
-        print(f"Current Rank {ddp_info.local_rank} Ran out of data. Resetting train_loader epoch to {cur_epoch}; might take a while...")
-        train_sampler.set_epoch(cur_epoch)
-        train_loader_iter = iter(train_loader)
-        data = next(train_loader_iter)
+    # try:
+    #     # if start_train_step == cur_train_step:
+    #     #     print(f"Current Rank {ddp_info.local_rank} Restarting training from step {cur_train_step}. Resetting train_loader epoch to {cur_epoch}; might take a while...")
+    #     #     train_sampler.set_epoch(cur_epoch)
+    #     #     train_loader_iter = iter(train_loader)
+    #     data = next(train_loader_iter)
+    # except StopIteration:
+    #     print(f"Current Rank {ddp_info.local_rank} Ran out of data. Resetting train_loader epoch to {cur_epoch}; might take a while...")
+    #     train_sampler.set_epoch(cur_epoch)
+    #     train_loader_iter = iter(train_loader)
+    #     data = next(train_loader_iter)
 
     batch = {k: v.to(ddp_info.device) if type(v) == torch.Tensor else v for k, v in data.items()}
 
@@ -362,6 +378,7 @@ while cur_train_step <= total_train_steps:
                     cur_param_update_step += 1
 
             scaler.update()
+            # lr_scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
             if is_ttt and config.model.ttt.supervise_mode == "g3r":
@@ -373,7 +390,7 @@ while cur_train_step <= total_train_steps:
     # for g3r, the lr scheduler will be updated after all the inner iterations are done
     lr_scheduler.step()
     cur_train_step += 1
-    export_inter_results = ((cur_train_step-1) == start_train_step) or (cur_train_step % config.training.vis_every == 0)
+    # export_inter_results = ((cur_train_step-1) == start_train_step) or (cur_train_step % config.training.vis_every == 0)
 
     # log and save checkpoint
     if ddp_info.is_main_process:
@@ -384,7 +401,7 @@ while cur_train_step <= total_train_steps:
             print_str = f"[Epoch {int(cur_epoch):>3d}] | Forwad step: {int(cur_train_step):>6d} (Param update step: {int(cur_param_update_step):>6d})"
             if is_ttt:
                 print_str += f" | ttt_iters: {ttt_metrics['n_iters']} | ttt_encoder_views: {ttt_metrics['n_encoder_views']} | ttt_ss_views: {ttt_metrics['n_ss_views']}"
-            print_str += f" | Iter Time: {time.time() - tic:.2f}s | LR: {optimizer.param_groups[0]['lr']:.6f}"
+            print_str += f" | Iter Time: {(time.time() - tic)/n_iters:.2f}s | LR: {optimizer.param_groups[0]['lr']:.6f}"
             # Add loss values
             print_str += "\ntarget: "
             for k, v in target_loss_dict.items():
@@ -405,7 +422,7 @@ while cur_train_step <= total_train_steps:
                 "forward_pass_step": cur_train_step,
                 "param_update_step": cur_param_update_step,
                 "lr": optimizer.param_groups[0]["lr"],
-                "iter_time": time.time() - tic,
+                "iter_time": (time.time() - tic) / n_iters,
                 "grad_norm": total_grad_norm,
                 "epoch": cur_epoch,
             }
@@ -478,12 +495,12 @@ while cur_train_step <= total_train_steps:
             print(f"Saved checkpoint at step {cur_train_step} to {os.path.abspath(ckpt_path)}")
         
         # export intermediate visualization results
-        if export_inter_results:
-            vis_path = os.path.join(config.training.checkpoint_dir, f"iter_{cur_train_step:08d}")
-            os.makedirs(vis_path, exist_ok=True)
-            visualize_intermediate_results(vis_path, input, target, rendered_input, rendered_target)
-            torch.cuda.empty_cache()
-            model.train()
+        # if export_inter_results:
+        #     vis_path = os.path.join(config.training.checkpoint_dir, f"iter_{cur_train_step:08d}")
+        #     os.makedirs(vis_path, exist_ok=True)
+        #     visualize_intermediate_results(vis_path, input, target, rendered_input, rendered_target)
+        #     torch.cuda.empty_cache()
+        #     model.train()
 
     # test on multiple nodes
     if config.training.test_every > 0 and (cur_train_step % config.training.test_every == 0 or cur_train_step == 1):
@@ -493,97 +510,95 @@ while cur_train_step <= total_train_steps:
         os.makedirs(out_dir, exist_ok=True)
         
         # instantiate a new iterator every time we test
-        test_loader_iter = iter(test_loader)
+        # test_loader_iter = iter(test_loader)
         with torch.no_grad(), torch.autocast(
             enabled=config.training.use_amp,
             device_type="cuda",
             dtype=amp_dtype_mapping[config.training.amp_dtype],
         ):
-            for (batch_idx, batch) in enumerate(test_loader_iter):
-                print(f"[Rank {ddp_info.local_rank}] Running inference on the {batch_idx}th batch")
-                if config.inference.get("first_n_batches", None) is not None and batch_idx >= config.inference.get("first_n_batches", None):
-                    break
-                batch = {k: v.to(ddp_info.device) if type(v) == torch.Tensor else v for k, v in batch.items()}
-                if is_ttt:
-                    for n_iters in iters:
-                        real_n_iters = n_iters
-                        if config.model.ttt.progressive:
-                            # bound the number of iterations by the warmup steps
-                            real_n_iters = int(1 + (n_iters - 1) * min(1.0, cur_train_step / config.model.ttt.warmup_steps))
-                        for i in range(len(enc_views)):
-                            n_encoder_views = enc_views[i]
-                            n_ss_views = ss_views[i]
-                            if config.model.ttt.supervise_mode != "g3r":
-                                input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
+            # for (idx, batch) in enumerate(test_loader_iter):
+            #     print(f"[Rank {ddp_info.local_rank}] Running inference on the {idx}th batch")
+            #     if config.inference.get("first_n_batches", None) is not None and idx >= config.inference.get("first_n_batches", None):
+            #         break
+            #     batch = {k: v.to(ddp_info.device) if type(v) == torch.Tensor else v for k, v in batch.items()}
+            if is_ttt:
+                for n_iters in iters:
+                    real_n_iters = n_iters
+                    if config.model.ttt.progressive:
+                        # bound the number of iterations by the warmup steps
+                        real_n_iters = int(1 + (n_iters - 1) * min(1.0, cur_train_step / config.model.ttt.warmup_steps))
+                    for i in range(len(enc_views)):
+                        n_encoder_views = enc_views[i]
+                        n_ss_views = ss_views[i]
+                        if config.model.ttt.supervise_mode != "g3r":
+                            input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
+                                batch,
+                                num_input_views=config.training.num_input_views,
+                                num_target_views=config.training.num_target_views,
+                                is_g3r=False, # at inference time, whether using G3R supervision behaves the same.
+                                n_encoder_views=n_encoder_views,
+                                n_ss_views=n_ss_views,
+                                n_iters=real_n_iters,
+                                has_target_image=True,
+                                target_has_input=False,
+                            )
+                        else:
+                            input = None
+                            target = None
+                            s = None
+                            full_encoded_latents = None
+                            input_pose_tokens = None
+                            target_pose_tokens = None
+                            
+                            for idx in range(real_n_iters):
+                                is_last = (idx == real_n_iters - 1)
+                                layer_idx = idx // config.model.ttt.n_iters_per_layer
+                                iter_idx = idx % config.model.ttt.n_iters_per_layer
+
+                                # in g3r, input loss metrics and target loss metrics are calculated on the updated state s.
+                                input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics = model(
                                     batch,
                                     num_input_views=config.training.num_input_views,
-                                    num_target_views=3,
-                                    is_g3r=False, # at inference time, whether using G3R supervision behaves the same.
+                                    num_target_views=config.training.num_target_views,
+                                    is_g3r=True,
                                     n_encoder_views=n_encoder_views,
                                     n_ss_views=n_ss_views,
-                                    n_iters=real_n_iters,
                                     has_target_image=True,
                                     target_has_input=False,
+                                    layer_idx=layer_idx,
+                                    iter_idx=iter_idx,
+                                    input=input,
+                                    target=target,
+                                    s=s,
+                                    full_encoded_latents=full_encoded_latents,
+                                    input_pose_tokens=input_pose_tokens,
+                                    target_pose_tokens=target_pose_tokens,
+                                    is_last=is_last,
                                 )
-                            else:
-                                input = None
-                                target = None
-                                s = None
-                                full_encoded_latents = None
-                                input_pose_tokens = None
-                                target_pose_tokens = None
-                                
-                                for idx in range(real_n_iters):
-                                    is_last = (idx == real_n_iters - 1)
-                                    layer_idx = idx // config.model.ttt.n_iters_per_layer
-                                    iter_idx = idx % config.model.ttt.n_iters_per_layer
-
-                                    # in g3r, input loss metrics and target loss metrics are calculated on the updated state s.
-                                    input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics = model(
-                                        batch,
-                                        num_input_views=config.training.num_input_views,
-                                        num_target_views=3,
-                                        is_g3r=True,
-                                        n_encoder_views=n_encoder_views,
-                                        n_ss_views=n_ss_views,
-                                        has_target_image=True,
-                                        target_has_input=False,
-                                        layer_idx=layer_idx,
-                                        iter_idx=iter_idx,
-                                        input=input,
-                                        target=target,
-                                        s=s,
-                                        full_encoded_latents=full_encoded_latents,
-                                        input_pose_tokens=input_pose_tokens,
-                                        target_pose_tokens=target_pose_tokens,
-                                        is_last=is_last,
-                                    )
-                            # export results with the iterations upper bound
-                            export_results(input, target, rendered_input, rendered_target, out_dir, compute_metrics=config.inference.get("compute_metrics"), n_encoder_views=n_encoder_views, n_ss_views=n_ss_views, n_iters=real_n_iters)
-                else:
-                    input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
-                        batch,
-                        num_input_views=config.training.num_input_views,
-                        num_target_views=3,
-                        has_target_image=True,
-                        target_has_input=False,
-                    )
-                    export_results(input, target, rendered_input, rendered_target, out_dir, compute_metrics=config.inference.get("compute_metrics"))
+                        # export results with the iterations upper bound
+                        export_results(input, target, rendered_input, rendered_target, out_dir, compute_metrics=config.inference.get("compute_metrics"), n_encoder_views=n_encoder_views, n_ss_views=n_ss_views, n_iters=n_iters)
+            else:
+                input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
+                    batch,
+                    num_input_views=config.training.num_input_views,
+                    num_target_views=config.training.num_target_views,
+                    has_target_image=True,
+                    target_has_input=False,
+                )
+                export_results(input, target, rendered_input, rendered_target, out_dir, compute_metrics=config.inference.get("compute_metrics"))
+            del input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
+            torch.cuda.empty_cache()
             dist.barrier()
             if ddp_info.is_main_process and config.inference.get("compute_metrics", False):
                 if is_ttt:
                     for n_iters in iters:
-                        real_n_iters = n_iters
-                        if config.model.ttt.progressive:
-                            # bound the number of iterations by the warmup steps
-                            real_n_iters = int(1 + (n_iters - 1) * min(1.0, cur_train_step / config.model.ttt.warmup_steps))
                         for i in range(len(enc_views)):
                             n_encoder_views = enc_views[i]
                             n_ss_views = ss_views[i]
-                            input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim = summarize_evaluation(out_dir, n_encoder_views=n_encoder_views, n_ss_views=n_ss_views, n_iters=real_n_iters)
+                            input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim = summarize_evaluation(out_dir, n_encoder_views=n_encoder_views, n_ss_views=n_ss_views, n_iters=n_iters)
                             
                             # log results in wandb
-                            test_name = f"test_{n_encoder_views}enc{n_ss_views}ss_{real_n_iters}iters"
+                            test_name = f"test_{n_encoder_views}enc{n_ss_views}ss_{n_iters}iters"
                             wandb.log({
                                 f"{test_name}/input_psnr": input_psnr,
                                 f"{test_name}/input_lpips": input_lpips,

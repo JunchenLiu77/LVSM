@@ -193,6 +193,12 @@ class Generator:
                 overrides.append(f'model.ttt.distill_factor={args.distill_factor}')
             if args.enable_unroll is not None and args.enable_unroll:
                 overrides.append('model.ttt.enable_unroll=true')
+            if args.progressive is not None and args.progressive:
+                overrides.append('model.ttt.progressive=true')
+            elif args.no_progressive is not None and args.no_progressive:
+                overrides.append('model.ttt.progressive=false')
+            if args.ttt_warmup_steps is not None:
+                overrides.append(f'model.ttt.warmup_steps={args.ttt_warmup_steps}')
         
         # Training configuration overrides
         if args.batch_size is not None:
@@ -302,7 +308,7 @@ class Generator:
         if args.nodes is not None:
             slurm['nodes'] = args.nodes
         if args.gpus is not None:
-            slurm['gpus_count'] = args.gpus
+            slurm['gpu_count'] = args.gpus
         if args.gpu_type is not None:
             slurm['gpu_type'] = args.gpu_type
             slurm['mem'] = '48GB' if args.gpu_type == 'l40s' else '80GB'
@@ -314,6 +320,8 @@ class Generator:
             torchrun_script = 'train.py'
             if args.profile is not None:
                 torchrun_script = 'train_profiled.py'
+            if args.overfit is not None:
+                torchrun_script = 'train_overfit.py'
         
         # Build the override string
         override_str = ' \\\n    '.join(overrides) if overrides else ''
@@ -349,8 +357,8 @@ echo "=============================================="
 
 # Load modules
 module load python/3.12
-module load StdEnv/2023 intel/2023.2.1
-module load cuda/11.8
+# module load StdEnv/2023 intel/2023.2.1
+module load cuda/12.2
 
 # Environment variables
 export OMP_NUM_THREADS=4
@@ -435,7 +443,13 @@ def main():
                         help='Number of TTT layers (encoder-decoder-ttt)')
     parser.add_argument('--n-iters-per-layer', type=int,
                         help='Number of TTT iterations per layer (encoder-decoder-ttt)')
-    parser.add_argument('--state-lr-mode', choices=['fixed', 'learnable', 'adaptive', 'adaptive_mlp'],
+    parser.add_argument('--progressive', action='store_true', default=None,
+                        help='Enable progressive training (encoder-decoder-ttt)')
+    parser.add_argument('--no-progressive', action='store_true', default=None,
+                        help='Disable progressive training (encoder-decoder-ttt)')
+    parser.add_argument('--ttt-warmup-steps', type=int,
+                        help='Warmup steps for progressive TTT training (encoder-decoder-ttt)')
+    parser.add_argument('--state-lr-mode', choices=['fixed', 'learnable', 'adaptive', 'adaptive_mlp', 'adaptive_scale_shift'],
                         help='State learning rate mode (encoder-decoder-ttt)')
     parser.add_argument('--state-lr-init', type=float,
                         help='Initial value for learnable state_lr (pre-sigmoid), only used when state_lr_mode is "learnable"')
@@ -619,6 +633,8 @@ def main():
                         help='Enable profiling mode')
     parser.add_argument('--dry-run', action='store_true', default=None,
                         help='Print script without saving')
+    parser.add_argument('--overfit', action='store_true', default=None,
+                        help='Overfit the model to a single data sample')
     parser.add_argument('--submit', action='store_true', default=None,
                         help='Submit the job immediately after generation')
     

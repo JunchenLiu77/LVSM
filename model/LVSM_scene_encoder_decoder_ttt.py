@@ -14,6 +14,7 @@ from utils import camera_utils, data_utils
 from .transformer import QK_Norm_TransformerBlock, init_weights
 from .loss import LossComputer
 from contextlib import nullcontext
+import math
 
 amp_dtype_mapping = {
     "fp16": torch.float16, 
@@ -56,7 +57,7 @@ class Images2LatentScene(nn.Module):
             for lr_param in self.ttt_lrnet:
                 self.ttt_param_counts['total_ttt_params'] += lr_param.numel()
                 self.ttt_param_counts['trainable_ttt_params'] += lr_param.numel() if lr_param.requires_grad else 0
-        elif self.config.model.ttt.state_lr_mode == "adaptive" or self.config.model.ttt.state_lr_mode == "adaptive_mlp":
+        elif "adaptive" in self.config.model.ttt.state_lr_mode:
             for lrnet in self.ttt_lrnet:
                 self.ttt_param_counts['total_ttt_params'] += sum(p.numel() for p in lrnet.parameters())
                 self.ttt_param_counts['trainable_ttt_params'] += sum(p.numel() for p in lrnet.parameters() if p.requires_grad)
@@ -226,6 +227,23 @@ class Images2LatentScene(nn.Module):
                 lrnet.apply(init_weights)
                 self.ttt_lrnet.append(lrnet)
             print(f"Using adaptive_mlp state_lr with 2 layers per layer")
+        elif state_lr_mode == "adaptive_scale_shift":
+            # Source: https://github.com/facebookresearch/DiT/blob/ed81ce2229091fd4ecc9a223645f95cf379d582b/models.py#L113-L116
+            # Use adaLN to modulate the output scale
+            self.ttt_lrnet = nn.ModuleList()
+            for _ in range(self.config.model.ttt.n_layer):
+                lrnet = nn.Sequential(
+                    nn.SiLU(),
+                    nn.Linear(self.config.model.transformer.d, 2 * self.config.model.transformer.d, bias=True),
+                )
+                # zero out the modulation layers
+                # nn.init.constant_(lrnet[-1].weight, 0.0)
+                # nn.init.constant_(lrnet[-1].bias, 0.0)
+                lrnet.apply(init_weights)
+                self.ttt_lrnet.append(lrnet)
+            print(f"Using adaptive_layernorm state_lr with adaLN to modulate the output scale")
+        elif state_lr_mode == "adaptive_mlp_with_time":
+            raise NotImplementedError("adaptive_mlp_with_time is not implemented")
         
         # Initialize LayerNorm modules for gradient and state normalization.
         if self.config.model.ttt.normalizer_type == "layer_norm":
@@ -308,7 +326,7 @@ class Images2LatentScene(nn.Module):
                             use_qk_norm=True,
                             use_positional_encoding=self.config.model.ttt.use_positional_encoding
                         ) for _ in range(self.config.model.ttt.n_blocks_per_layer)],
-                        nn.Linear(self.config.model.transformer.d, self.config.model.transformer.d, bias=False),
+                        # nn.Linear(self.config.model.transformer.d, self.config.model.transformer.d, bias=False),
                     )
                 )
                 print(f"Initialized TTT blocks as a simple MLP and {self.config.model.ttt.n_blocks_per_layer} transformer blocks")
@@ -343,7 +361,7 @@ class Images2LatentScene(nn.Module):
         # initialize ttt blocks weights
         for block in self.ttt_blocks:
             block.apply(init_weights)
-            nn.init.zeros_(block[-1].weight)
+            # nn.init.zeros_(block[-1].weight)
             # init the last layer of the ttt blocks to be all zeros, so that the model is a residual connection
             # for i in range(1, self.config.model.ttt.n_blocks_per_layer + 1):
             #     nn.init.zeros_(block[-i].attn.fc.weight)
@@ -624,6 +642,8 @@ class Images2LatentScene(nn.Module):
         input_loss, 
         lrnet=None,
         need_grad=False,
+        t=None,
+        grad_s=None,
     ):
         """
         Update state using the computed loss.
@@ -642,13 +662,16 @@ class Images2LatentScene(nn.Module):
         """
         layer_metrics = {}
         
-        if self.config.model.ttt.grad_mode == "normal":
-            # retrain_graph is needed for traversing the same computational graph the second time
-            grad_s = torch.autograd.grad(input_loss, decoder_input, create_graph=False, retain_graph=True)[0]
-        elif self.config.model.ttt.grad_mode == "zero":
-            grad_s = torch.zeros_like(s)
-        elif self.config.model.ttt.grad_mode == "random":
-            grad_s = torch.randn_like(s)
+        if grad_s is None:
+            if self.config.model.ttt.grad_mode == "normal":
+                # retrain_graph is needed for traversing the same computational graph the second time
+                grad_s = torch.autograd.grad(input_loss, decoder_input, create_graph=False, retain_graph=True)[0]
+            elif self.config.model.ttt.grad_mode == "zero":
+                grad_s = torch.zeros_like(s)
+            elif self.config.model.ttt.grad_mode == "random":
+                grad_s = torch.randn_like(s)
+        else:
+            print(f"use saved grad_s, grad_s.mean: {grad_s.mean().item()}, grad_s.std: {grad_s.std().item()}")
 
         if self.config.model.ttt.detach_grad:
             # If detach grad, the gradient will not flow into the decoder 
@@ -658,6 +681,11 @@ class Images2LatentScene(nn.Module):
         layer_metrics["orig_grad_max"] = torch.max(torch.abs(grad_s)).item()
         layer_metrics["orig_grad_mean"] = torch.mean(torch.abs(grad_s)).item()
         layer_metrics["orig_grad_std"] = torch.std(grad_s).item()
+
+        # calculate the domain of s
+        s_mean = s.mean(dim=(-1), keepdim=True)
+        s_std = s.std(dim=(-1), keepdim=True)
+        # print(f"s mean: {s.mean().item()}, s std: {s.std().item()}")
 
         # with (torch.no_grad() if not need_grad else torch.enable_grad()), torch.autocast(enabled=self.config.training.use_amp, device_type="cuda", dtype=amp_dtype_mapping[self.config.training.amp_dtype]):
         with nullcontext():
@@ -724,6 +752,13 @@ class Images2LatentScene(nn.Module):
                     opt_input = torch.cat((opt_input_s, grad_s_normed), dim=-1) # [b, n_latent_vectors, 2*d]
 
                 delta_s = opt(opt_input) # [b, n_latent_vectors, d]
+
+                # pull delta_s to the same domain as s
+                # print(f"delta_s mean: {delta_s.mean().item()}, delta_s std: {delta_s.std().item()}")
+                # delta_s = (delta_s - delta_s.mean(dim=(-1), keepdim=True)) / (delta_s.std(dim=(-1), keepdim=True) + 1e-10)
+                # delta_s = delta_s * (s_std + 1e-10) + s_mean
+                delta_s = delta_s / (delta_s.std(dim=(-1), keepdim=True) + 1e-10) * s_std
+                # delta_s = delta_s * s_std
             
             # get the effective state_lr for this layer
             if self.config.model.ttt.state_lr_mode == "learnable":
@@ -739,31 +774,46 @@ class Images2LatentScene(nn.Module):
                 # adding a bias term to make the output around -2 before sigmoid, the learning rate will be around 0.1-0.2 at the beginning.
                 # This makes the residual update smaller at the beginning while maintaining relatively big gradient for the lrnet.
                 state_lr = torch.sigmoid(lrnet(log_abs_grad_s) + self.config.model.ttt.state_lr_init) # [b, n_latent_vectors, d]
+            elif self.config.model.ttt.state_lr_mode == "adaptive_scale_shift":
+                assert lrnet is not None, "lrnet is required for adaptive_scale_shift state_lr"
+                # Pass the "magnitude" of gradient to the lrnet. Since the gradient can be small, we use the log scale as the input.
+                log_abs_grad_s = torch.log(torch.abs(grad_s) + 1e-10) # [b, n_latent_vectors, d]
+                shift, scale = lrnet(log_abs_grad_s).chunk(2, dim=-1) # [b, n_latent_vectors, d]
+                # modulate the delta_s
+                def modulate(x, shift, scale):
+                    return x * (1 + scale) + shift
+                delta_s = modulate(delta_s, shift, scale)
+                state_lr = torch.ones_like(shift) * self.config.model.ttt.state_lr
             else:
                 # Use fixed state_lr from config
                 state_lr = self.config.model.ttt.state_lr
+
+            # apply the cosine scheduler to the state_lr
+            # def cosine_scheduler(t, s=0.008):
+            #     return math.cos((t + s) / (1 + s) * math.pi / 2) ** 2
+            # state_lr = state_lr * cosine_scheduler(t)
             
             # Apply update with effective learning rate
             s_update = delta_s * state_lr
             
             # Apply update
             if self.config.model.ttt.is_residual:
-                s = s_update + (s.detach() if self.config.model.ttt.detach_residual else s)
-            else:   
-                s = s_update
+                new_s = s_update + (s.detach() if self.config.model.ttt.detach_residual else s)
+                # pull the new s to the same domain as previous s
+                new_s = new_s / (new_s.std(dim=(-1), keepdim=True) + 1e-10) * s_std
 
             # log state statistics
-            layer_metrics["state_max"] = torch.max(s).item()
-            layer_metrics["state_mean"] = torch.mean(s).item()
-            layer_metrics["state_std"] = torch.std(s).item()
+            layer_metrics["state_max"] = torch.max(new_s).item()
+            layer_metrics["state_mean"] = torch.mean(new_s).item()
+            layer_metrics["state_std"] = torch.std(new_s).item()
             
             # log learnable lr statistics if applicable
-            if self.config.model.ttt.state_lr_mode == "learnable" or self.config.model.ttt.state_lr_mode == "adaptive" or self.config.model.ttt.state_lr_mode == "adaptive_mlp":
+            if self.config.model.ttt.state_lr_mode == "learnable" or "adaptive" in self.config.model.ttt.state_lr_mode:
                 layer_metrics["state_lr_mean"] = torch.mean(state_lr).item()
                 layer_metrics['state_lr_max'] = torch.max(state_lr).item()
                 layer_metrics['state_lr_std'] = torch.std(state_lr).item()
         
-        return s, layer_metrics
+        return new_s, grad_s, layer_metrics
 
 
     def ttt_forward(self, input, target, n_encoder_views=None, n_ss_views=None, n_iters=None):
@@ -795,7 +845,7 @@ class Images2LatentScene(nn.Module):
         if self.config.model.ttt.detach_s0:
             # If detach s0, the gradient will not flow into encoder, tokenizer and the register_token.
             # We need to detach s but then make it require grad again for autograd.grad to work
-            s = s.detach()
+            s = s.detach().requires_grad_(True)
 
         # iterate over layers and iterations
         input_pose_tokens = None
@@ -804,7 +854,7 @@ class Images2LatentScene(nn.Module):
         
         losses = []
         if self.config.model.ttt.enable_unroll:
-            current_input_loss = 1e10
+            cur_ss_loss = 1e10
             # prev_s = s # this will be triggered by the first layer
         
         for layer_idx in range(self.config.model.ttt.n_layer):
@@ -821,12 +871,13 @@ class Images2LatentScene(nn.Module):
                 )
                 
                 # if the input loss is bigger, unroll the state
-                if input_loss_metrics["loss"] > current_input_loss:
-                    s = prev_s
-                    break # no longer update the state
-                else:
-                    current_input_loss = input_loss_metrics["loss"]
-                    prev_s = s
+                if self.config.model.ttt.enable_unroll:
+                    if input_loss_metrics["loss"] > cur_ss_loss:
+                        s = prev_s
+                        # break # no longer update the state # will update state with smaller learning rate
+                    else:
+                        cur_ss_loss = input_loss_metrics["loss"]
+                        prev_s = s
 
                 if self.config.model.ttt.supervise_mode == "average":
                     if self.config.training.supervision == "input":
@@ -842,14 +893,15 @@ class Images2LatentScene(nn.Module):
                 state_norm = self.ttt_state_normalizers[layer_idx]
                 opt = self.ttt_blocks[layer_idx]
                 lrnet = None
-                if self.config.model.ttt.state_lr_mode in ["learnable", "adaptive", "adaptive_mlp"]:
+                if self.config.model.ttt.state_lr_mode in ["learnable"] or "adaptive" in self.config.model.ttt.state_lr_mode:
                     lrnet = self.ttt_lrnet[layer_idx]
                 
                 # training time: if detach middle, we dont keep tracking gradients before the last layer
                 # inference time: always dont keep tracking gradients
-                s, update_metrics = self._update_state_with_loss(
+                s, grad_s, update_metrics = self._update_state_with_loss(
                     s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], lrnet,
                     need_grad=(not self.config.model.ttt.detach_middle or (iter_idx == n_iters - 1)) and not self.config.inference.if_inference,
+                    t=iter_idx/n_iters,
                 )
                 
                 # Merge metrics
@@ -877,10 +929,10 @@ class Images2LatentScene(nn.Module):
             target_need_grad=self.config.training.supervision == "target" and not self.config.inference.if_inference,
         )
         if self.config.model.ttt.enable_unroll:
-            if last_input_loss_metrics["loss"] > current_input_loss:
+            if last_input_loss_metrics["loss"] > cur_ss_loss:
                 s = prev_s
             else:
-                current_input_loss = last_input_loss_metrics["loss"]
+                cur_ss_loss = last_input_loss_metrics["loss"]
                 prev_s = s
 
         if self.config.training.supervision == "input":
@@ -908,7 +960,7 @@ class Images2LatentScene(nn.Module):
         return input, target, last_input_loss_metrics, last_target_loss_metrics, last_distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
 
 
-    def ttt_forward_g3r(self, input, target, layer_idx, iter_idx, n_encoder_views, n_ss_views, s=None, full_encoded_latents=None, input_pose_tokens=None, target_pose_tokens=None, is_last=False, current_input_loss=None, prev_s=None):
+    def ttt_forward_g3r(self, input, target, layer_idx, iter_idx, n_encoder_views, n_ss_views, s=None, full_encoded_latents=None, input_pose_tokens=None, target_pose_tokens=None, is_last=False):
         """
         Forward the latent tokens with the TTT blocks for G3R supervision. Returns the updated state and TTT metrics for logging.
         Args:
@@ -921,62 +973,85 @@ class Images2LatentScene(nn.Module):
             input_pose_tokens: (Optional) Cached pose tokens for input views
             target_pose_tokens: (Optional) Cached pose tokens for target views
             update: Whether to update the state
-            current_input_loss: (Optional) Current input loss
-            prev_s: (Optional) Previous state
         Returns:
             s: Updated latent tokens [b, n_latent_vectors, d]
         """
         assert self.config.model.ttt.supervise_mode == "g3r", "supervise_mode must be g3r for G3R supervision"
         assert layer_idx is not None and iter_idx is not None, "layer_idx and iter_idx must be provided for G3R supervision"
+        assert self.config.model.ttt.distill_factor == 0.0, "distill_factor must be 0.0 for G3R supervision"
 
         if s is None:
             assert layer_idx == 0 and iter_idx == 0, "layer_idx and iter_idx must be 0 for G3R supervision when s is not provided"
             partial_encoded_latents, full_encoded_latents = self.encode(input, n_encoder_views)
             s = partial_encoded_latents
         
-        if self.config.model.ttt.detach_s0:
-            # If detach s0, the gradient will not flow into encoder, tokenizer and the register_token.
-            # We need to detach s but then make it require grad again for autograd.grad to work
-            s = s.detach().requires_grad_(True)
+        s = s.detach().requires_grad_(True)
 
-        # Compute self-supervision losses
-        decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, loss_metrics, input_pose_tokens, target_pose_tokens, rendered_input, rendered_target = self._compute_ttt_loss(
-            s, input, target, n_ss_views, full_encoded_latents, input_pose_tokens, target_pose_tokens,
-            input_need_grad=True,
-            target_need_grad=self.config.training.supervision == "target" and not self.config.inference.if_inference,
-        )
-
-        # if the input loss is bigger, unroll the state
-        if input_loss_metrics["loss"] > current_input_loss:
-            s = prev_s
-        else:
-            current_input_loss = input_loss_metrics["loss"]
-            prev_s = s
+        # Compute self-supervision losses which is calculated on the input views.
+        with torch.enable_grad():
+            rendered_input, input_pose_tokens = self.decode(
+                input, 
+                s, 
+                target_pose_tokens=input_pose_tokens, 
+                last_n=n_ss_views,
+            )
+            ss_loss_metrics = self.loss_computer(rendered_input, input.image[:, -n_ss_views:, ...])
         
         # Update state with self-supervision losses except for the last layer
-        layer_metrics = loss_metrics
-        if not is_last:
-            grad_norm = self.ttt_grad_normalizers[layer_idx]
-            state_norm = self.ttt_state_normalizers[layer_idx]
-            opt = self.ttt_blocks[layer_idx]
-            lrnet = None
-            if self.config.model.ttt.state_lr_mode in ["learnable", "adaptive", "adaptive_mlp"]:
-                lrnet = self.ttt_lrnet[layer_idx]
+        grad_norm = self.ttt_grad_normalizers[layer_idx]
+        state_norm = self.ttt_state_normalizers[layer_idx]
+        opt = self.ttt_blocks[layer_idx]
+        lrnet = None
+        if self.config.model.ttt.state_lr_mode in ["learnable"] or "adaptive" in self.config.model.ttt.state_lr_mode:
+            lrnet = self.ttt_lrnet[layer_idx]
 
-            s, update_metrics = self._update_state_with_loss(s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], lrnet, need_grad=True)
-            layer_metrics = {**loss_metrics, **update_metrics}
+        new_s, grad_s, layer_metrics = self._update_state_with_loss(
+            s, s, grad_norm, state_norm, opt, ss_loss_metrics["loss"], lrnet,
+            need_grad=True,
+            t=iter_idx/(self.config.model.ttt.n_layer * self.config.model.ttt.n_iters_per_layer),
+        )
+
+        if self.config.model.ttt.enable_unroll:
+            # compute the ss loss again with the new state, we dont need gradient this time
+            with torch.no_grad():
+                rendered_input, _ = self.decode(
+                    input, new_s,
+                    target_pose_tokens=input_pose_tokens, 
+                    last_n=n_ss_views,
+                )
+                new_ss_loss_metrics = self.loss_computer(rendered_input, input.image[:, -n_ss_views:, ...])
+            
+            # only update state if the new ss loss is smaller
+            if new_ss_loss_metrics["loss"] < ss_loss_metrics["loss"]:
+                print(f"{iter_idx}th iter new ss loss is smaller than cur ss loss: {new_ss_loss_metrics['loss']:.4f} < {ss_loss_metrics['loss']:.4f}, update the state")
+                s = new_s
+                ss_loss_metrics = new_ss_loss_metrics
+            else:
+                print(f"{iter_idx}th iter new ss loss is larger than cur ss loss: {new_ss_loss_metrics['loss']:.4f} > {ss_loss_metrics['loss']:.4f}, keep the current state")
         else:
-            # TODO: hacky replacing
-            with torch.no_grad(), torch.autocast(enabled=self.config.training.use_amp, device_type="cuda", dtype=amp_dtype_mapping[self.config.training.amp_dtype]):
-            # with nullcontext():
-                rendered_input, _ = self.decode(input, decoder_input)
+            # if unroll is disabled, we use the new state directly
+            s = new_s
 
+        if is_last:
+            # render and calculate the input loss on all input views
+            with torch.no_grad():
+                rendered_input, _ = self.decode(input, s)
+                input_loss_metrics = self.loss_computer(rendered_input, input.image)
+                layer_metrics["input_loss"] = input_loss_metrics["loss"].item()
+        else:
+            rendered_input = None
+            input_loss_metrics = None
+            layer_metrics["input_loss"] = 0.0
+        
+        rendered_target, target_pose_tokens = self.decode(target, s, target_pose_tokens=target_pose_tokens)
+        target_loss_metrics = self.loss_computer(rendered_target, target.image)
+        layer_metrics["target_loss"] = target_loss_metrics["loss"].item()
+
+        distillation_loss = None
         if self.config.training.supervision == "input":
             loss = input_loss_metrics["loss"]
         elif self.config.training.supervision == "target":
             loss = target_loss_metrics["loss"]
-        if self.config.model.ttt.distill_factor > 0.0:
-            loss += distillation_loss * self.config.model.ttt.distill_factor
 
         return input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics
 
