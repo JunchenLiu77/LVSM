@@ -225,7 +225,8 @@ class Generator:
             overrides.append(f'training.wandb_exp_name="{args.exp_name}"')
         if args.scheduler_type is not None:
             overrides.append(f'training.scheduler_type={args.scheduler_type}')
-
+        if args.checkpoint_every is not None:
+            overrides.append(f'training.checkpoint_every={args.checkpoint_every}')
         if args.freeze_encoder is not None and args.freeze_encoder:
             overrides.append('training.freeze_encoder=true')   
         elif args.no_freeze_encoder is not None and args.no_freeze_encoder:
@@ -309,6 +310,7 @@ class Generator:
             slurm['nodes'] = args.nodes
         if args.gpus is not None:
             slurm['gpu_count'] = args.gpus
+            slurm['cpus_per_task'] = args.gpus * 4
         if args.gpu_type is not None:
             slurm['gpu_type'] = args.gpu_type
             slurm['mem'] = '48GB' if args.gpu_type == 'l40s' else '80GB'
@@ -597,6 +599,8 @@ def main():
                         help='Target has input views')
     parser.add_argument('--no-target-has-input', action='store_true', default=None,
                         help='Do not target has input views')
+    parser.add_argument('--checkpoint-every', type=int,
+                        help='Checkpoint every n steps')
     parser.add_argument('--test-every', type=int,
                         help='Test every n steps')
     parser.add_argument('--test-1enc1ss', action='store_true', default=None,

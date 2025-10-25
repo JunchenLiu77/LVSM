@@ -19,8 +19,8 @@ class Dataset(Dataset):
 
         try:
             with open(dataset_path, 'r') as f:
-                self.all_scene_paths = f.read().splitlines()
-            self.all_scene_paths = [path for path in self.all_scene_paths if path.strip()]
+                all_scene_paths = f.read().splitlines()
+            all_scene_paths = [path for path in all_scene_paths if path.strip()]
         
         except Exception as e:
             print(f"Error reading dataset paths from '{dataset_path}'")
@@ -32,21 +32,35 @@ class Dataset(Dataset):
         self.inference = inference
         # Load file that specifies the input and target view indices to use for inference
         if self.inference:
-            self.view_idx_list = dict()
+            view_idx_list = dict()
             assert self.config.inference["view_idx_file_path"] is not None and os.path.exists(self.config.inference["view_idx_file_path"]), "view_idx_file_path must be provided for inference"
             with open(self.config.inference["view_idx_file_path"], 'r') as f:
-                self.view_idx_list = json.load(f)
+                view_idx_list = json.load(f)
                 # filter out None values, i.e. scenes that don't have specified input and targetviews
-                self.view_idx_list_filtered = [k for k, v in self.view_idx_list.items() if v is not None]
+                view_idx_list_filtered = [k for k, v in view_idx_list.items() if v is not None]
                 filtered_scene_paths = []
-                for scene in self.all_scene_paths:
+                for scene in all_scene_paths:
                     file_name = scene.split("/")[-1]
                     scene_name = file_name.split(".")[0]
-                    if scene_name in self.view_idx_list_filtered:
+                    if scene_name in view_idx_list_filtered:
                         filtered_scene_paths.append(scene)
 
-                self.all_scene_paths = filtered_scene_paths
-            print(f"Found {len(self.view_idx_list_filtered)} scenes in index file, {len(self.all_scene_paths)} scenes exist in the dataset.")
+                all_scene_paths = filtered_scene_paths
+            
+            # prevent memory leaking by converting dict to numpy array
+            # https://github.com/pytorch/pytorch/issues/13246#issuecomment-905703662
+            # https://github.com/pytorch/pytorch/issues/13246#issuecomment-715050814
+            view_idx_list_np = []
+            for scene_path in all_scene_paths:
+                data_json = json.load(open(scene_path, 'r'))
+                scene_name = data_json["scene_name"]
+                assert scene_name in view_idx_list, f"Scene {scene_name} is not in the view idx list."
+                view_idx_list_np.append(view_idx_list[scene_name]["context"] + view_idx_list[scene_name]["target"])
+            self.view_idx_list_np = np.array(view_idx_list_np).astype(np.int32)
+            print(f"Found {len(view_idx_list_filtered)} scenes in index file, {len(all_scene_paths)} scenes exist in the dataset.")
+        
+        # prevent memory leaking by converting string list to numpy array
+        self.all_scene_paths = np.array(all_scene_paths).astype(np.bytes_)
 
 
     def __len__(self):
@@ -154,19 +168,19 @@ class Dataset(Dataset):
 
     def __getitem__(self, idx):
         # try:
-        scene_path = self.all_scene_paths[idx].strip()
+        scene_path = str(self.all_scene_paths[idx], encoding="utf-8").strip()
         data_json = json.load(open(scene_path, 'r'))
         frames = data_json["frames"]
         scene_name = data_json["scene_name"]
 
-        if self.inference and scene_name in self.view_idx_list:
-            current_view_idx = self.view_idx_list[scene_name]
-            assert self.num_input_views >= len(current_view_idx["context"]), f"We have {len(current_view_idx["context"])} context views, but we want to select {self.num_input_views} input views."
-            assert self.num_target_views == len(current_view_idx["target"]), f"For now we expect the number of target views to be the same as the number of target views in the index file."
-            context_indices = current_view_idx["context"]
-            target_indices = current_view_idx["target"]
+        if self.inference:
+            current_view_idx = self.view_idx_list_np[idx] # concatenate context and target views
+            context_indices = list(current_view_idx[:len(current_view_idx) - self.num_target_views])
+            target_indices = list(current_view_idx[-self.num_target_views:])
+            assert self.num_input_views >= len(context_indices), f"We have {len(context_indices)} context views, but we want to select {self.num_input_views} input views."
+            assert self.num_target_views == len(target_indices), f"For now we expect the number of target views to be the same as the number of target views in the index file."
             
-            if self.num_input_views > len(current_view_idx["context"]):
+            if self.num_input_views > len(context_indices):
                 # randomly sample extra input views in between context views
                 n_extra_input_views = self.num_input_views - len(context_indices)
                 candidates = list(range(len(frames)))

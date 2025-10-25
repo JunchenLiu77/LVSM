@@ -476,13 +476,12 @@ while cur_train_step <= total_train_steps:
             ckpt_path = os.path.join(config.training.checkpoint_dir, f"ckpt_{cur_train_step:016}.pt")
             torch.save(checkpoint, ckpt_path)
             print(f"Saved checkpoint at step {cur_train_step} to {os.path.abspath(ckpt_path)}")
-        
+
         # export intermediate visualization results
         if export_inter_results:
             vis_path = os.path.join(config.training.checkpoint_dir, f"iter_{cur_train_step:08d}")
             os.makedirs(vis_path, exist_ok=True)
             visualize_intermediate_results(vis_path, input, target, rendered_input, rendered_target)
-            torch.cuda.empty_cache()
             model.train()
 
     # test on multiple nodes
@@ -594,8 +593,10 @@ while cur_train_step <= total_train_steps:
                             }, step=cur_train_step)
                 else:
                     input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim = summarize_evaluation(out_dir)
+    
+    torch.cuda.empty_cache()
+    
     if export_inter_results:
-        torch.cuda.empty_cache()
         dist.barrier()
         
 
