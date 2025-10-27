@@ -21,6 +21,11 @@ Examples:
 
 import argparse
 import os
+import re
+import subprocess
+import time
+import signal
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +50,8 @@ class Generator:
             'gpu_count': 2,
         }
         
+        self.shutdown_requested = False
+        
     def generate_script(self, args):
         """Generate the complete SLURM script"""
         
@@ -55,7 +62,11 @@ class Generator:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             exp_name = f"{args.model.replace('-', '_')}_{timestamp}"
         output_dir = f"results/{exp_name}"
-        script_path = f"{output_dir}/run.sh"
+        
+        # Save the script with a timestamp to avoid overwriting
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        script_path = f"{output_dir}/run_{timestamp}.sh"
+        symlink_path = f"{output_dir}/run.sh"
         
         # Determine config file
         config_file = self.model_config[args.model]
@@ -76,6 +87,13 @@ class Generator:
         
         # Make it executable
         os.chmod(script_path, 0o755)
+        
+        # Create or update symlink to point to the latest script
+        if os.path.islink(symlink_path):
+            os.unlink(symlink_path)
+        elif os.path.exists(symlink_path):
+            os.remove(symlink_path)
+        os.symlink(os.path.basename(script_path), symlink_path)
         
         return script_path
     
@@ -203,6 +221,8 @@ class Generator:
         # Training configuration overrides
         if args.batch_size is not None:
             overrides.append(f'training.batch_size_per_gpu={args.batch_size}')
+        if args.seed is not None:
+            overrides.append(f'training.seed={args.seed}')
         if args.steps is not None:
             overrides.append(f'training.train_steps={args.steps}')
         if args.grad_accum_steps is not None:
@@ -395,13 +415,34 @@ echo "Configuration overrides:"'''
         script += f'''
 echo
 
+# Auto-resubmit: Check for existing checkpoint and update config
+RUNTIME_OVERRIDES=""'''
+        
+        if args.auto_resubmit and not args.inference:
+            script += f'''
+LATEST_CKPT=$(ls -t {output_dir}/step_*.pt 2>/dev/null | head -n 1)
+if [ -n "$LATEST_CKPT" ]; then
+    echo "Found existing checkpoint: $LATEST_CKPT"
+    echo "Resuming training from checkpoint..."
+    RUNTIME_OVERRIDES="training.resume_ckpt=\\"$LATEST_CKPT\\" training.reset_training_state=false"
+fi
+'''
+        
+        script += f'''
+
 # Run the training/inference
 srun --time {slurm['time']} uv run torchrun \\
     --nproc_per_node={slurm['gpu_count']} \\
     --master_addr=$MASTER_ADDR \\
     --master_port=$MASTER_PORT \\
     {torchrun_script} \\
-    --config {config_file}{override_str}
+    --config {config_file}{override_str}'''
+        
+        # Add runtime overrides if auto-resubmit is enabled
+        if args.auto_resubmit and not args.inference:
+            script += ' \\\n    $RUNTIME_OVERRIDES'
+        
+        script += f'''
 
 # Restore stderr
 exec 2>&3
@@ -415,6 +456,157 @@ echo "=============================================="
 exit 0
 '''
         return script
+    
+    def check_job_status(self, job_id):
+        """Check if a SLURM job is still in the queue or running"""
+        try:
+            result = subprocess.run(
+                f"squeue -j {job_id} -h -o '%T'",
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            status = result.stdout.strip()
+            return status if status else None
+        except Exception as e:
+            print(f"Warning: Could not check job status: {e}")
+            return None
+    
+    def find_latest_checkpoint(self, output_dir):
+        """Find the latest checkpoint in the output directory"""
+        import glob
+        checkpoints = glob.glob(f"{output_dir}/ckpt_*.pt")
+        if not checkpoints:
+            return None
+        # Sort by modification time
+        checkpoints.sort(key=os.path.getmtime, reverse=True)
+        return checkpoints[0]
+    
+    def signal_handler(self, signum, frame):
+        """Handle Ctrl+C gracefully"""
+        print("\n\n" + "="*60)
+        print("Shutdown signal received. Stopping monitoring...")
+        print("="*60)
+        self.shutdown_requested = True
+    
+    def monitor_and_resubmit(self, args, output_dir, job_id, check_interval=30):
+        """Monitor job status and auto-resubmit when completed"""
+        
+        # Register signal handler for graceful shutdown
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
+        
+        # Create stop signal file path
+        stop_file = f"{output_dir}/.stop"
+        
+        # Remove stop file if it exists from previous run
+        if os.path.exists(stop_file):
+            os.remove(stop_file)
+        
+        print("\n" + "="*60)
+        print("AUTO-RESUBMIT MONITOR STARTED")
+        print("="*60)
+        print(f"Monitoring job ID: {job_id}")
+        print(f"Output directory: {output_dir}")
+        print(f"Check interval: {check_interval} seconds")
+        print("")
+        print("To stop monitoring from anywhere:")
+        print(f"  touch {stop_file}")
+        print("="*60 + "\n")
+        
+        iteration = 0
+        
+        while not self.shutdown_requested:
+            # Check for stop signal file
+            if os.path.exists(stop_file):
+                print(f"\nStop signal detected ({stop_file})")
+                print("Stopping monitor gracefully...")
+                os.remove(stop_file)
+                break
+            
+            iteration += 1
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Check job status
+            status = self.check_job_status(job_id)
+            
+            if status:
+                # Job is still in queue or running
+                print(f"[{timestamp}] Iteration {iteration}: Job {job_id} status: {status}")
+            else:
+                # Job completed or not found
+                print(f"\n[{timestamp}] Job {job_id} is no longer in queue!")
+                print("Looking for latest checkpoint...")
+                
+                latest_ckpt = self.find_latest_checkpoint(output_dir)
+                
+                if not latest_ckpt:
+                    print("WARNING: No checkpoint found. Stopping auto-resubmit.")
+                    break
+                
+                print(f"Found checkpoint: {latest_ckpt}")
+                print("Generating new script with latest checkpoint...")
+                
+                # Update args to use the latest checkpoint
+                args.resume_ckpt = latest_ckpt
+                args.reset_training_state = False
+                args.no_reset_training_state = True
+                
+                # Increment seed for the next job (if seed was provided)
+                # If no seed was provided initially, generate one based on timestamp
+                if args.seed is not None:
+                    args.seed += 1
+                    print(f"Using new seed: {args.seed}")
+                elif hasattr(args, 'auto_resubmit') and args.auto_resubmit:
+                    # Generate seed from timestamp for continuation jobs
+                    import random
+                    args.seed = int(datetime.now().timestamp() * 1000) % 100000
+                    print(f"Generated new seed: {args.seed}")
+                
+                # Generate new script
+                script_path = self.generate_script(args)
+                symlink_path = f"{output_dir}/run.sh"
+                
+                print(f"Generated: {script_path}")
+                print(f"Symlink: {symlink_path}")
+                print("Submitting continuation job...")
+                
+                # Submit the new job
+                result = subprocess.run(
+                    f"sbatch --exclude=kn127 {symlink_path}",
+                    shell=True,
+                    capture_output=True,
+                    text=True
+                )
+                
+                print(result.stdout.strip())
+                
+                # Extract new job ID
+                match = re.search(r'Submitted batch job (\d+)', result.stdout)
+                if match:
+                    job_id = match.group(1)
+                    print(f"New job ID: {job_id}")
+                    print(f"Continuing monitoring...\n")
+                else:
+                    print("ERROR: Could not extract job ID from submission output.")
+                    print("Stopping auto-resubmit.")
+                    break
+            
+            # Wait before checking again
+            try:
+                time.sleep(check_interval)
+            except KeyboardInterrupt:
+                self.shutdown_requested = True
+                break
+        
+        print("\n" + "="*60)
+        print("AUTO-RESUBMIT MONITOR STOPPED")
+        print("="*60)
+        
+        # Clean up stop file if exists
+        if os.path.exists(stop_file):
+            os.remove(stop_file)
 
 
 def main():
@@ -539,6 +731,8 @@ def main():
     # Training configuration
     parser.add_argument('--batch-size', type=int,
                         help='Batch size per GPU')
+    parser.add_argument('--seed', type=int,
+                        help='Random seed')
     parser.add_argument('--steps', type=int,
                         help='Number of training steps')
     parser.add_argument('--grad-accum-steps', type=int,
@@ -641,6 +835,10 @@ def main():
                         help='Overfit the model to a single data sample')
     parser.add_argument('--submit', action='store_true', default=None,
                         help='Submit the job immediately after generation')
+    parser.add_argument('--auto-resubmit', action='store_true', default=None,
+                        help='Automatically resubmit the job after completion with latest checkpoint (generator will monitor job status)')
+    parser.add_argument('--check-interval', type=int, default=30,
+                        help='Interval in seconds to check job status when auto-resubmit is enabled (default: 30)')
     
     args = parser.parse_args()
     
@@ -648,19 +846,55 @@ def main():
     generator = Generator()
     script_path = generator.generate_script(args)
     
+    # Show both the timestamped script and the symlink
+    output_dir = script_path.rsplit('/', 1)[0]
+    symlink_path = f"{output_dir}/run.sh"
+    
     print(f"Generated script: {script_path}")
+    print(f"Symlink created: {symlink_path} -> {os.path.basename(script_path)}")
     
     if args.dry_run:
         print("\n--- Script Content ---")
         with open(script_path, 'r') as f:
             print(f.read())
         os.remove(script_path)  # Clean up in dry-run mode
+        if os.path.islink(symlink_path):
+            os.unlink(symlink_path)
     
     if args.submit and not args.dry_run:
-        print(f"Submitting job...")
-        os.system(f"sbatch --exclude=kn127 {script_path}")
+        print(f"\nSubmitting job...")
+        result = subprocess.run(
+            f"sbatch --exclude=kn127 {symlink_path}", 
+            shell=True, 
+            capture_output=True, 
+            text=True
+        )
+        print(result.stdout.strip())
+        
+        # Extract job ID
+        match = re.search(r'Submitted batch job (\d+)', result.stdout)
+        if match:
+            job_id = match.group(1)
+            print(f"Job ID: {job_id}")
+            
+            # If auto-resubmit is enabled, start monitoring
+            if args.auto_resubmit and not args.inference:
+                check_interval = args.check_interval if hasattr(args, 'check_interval') else 30
+                print(f"\nAuto-resubmit enabled. Starting job monitor...")
+                try:
+                    generator.monitor_and_resubmit(args, output_dir, job_id, check_interval)
+                except Exception as e:
+                    print(f"\nMonitoring error: {e}")
+                    print("Auto-resubmit stopped due to error.")
+        else:
+            print("Warning: Could not extract job ID from submission output.")
+            if args.auto_resubmit:
+                print("Auto-resubmit will not work without job ID.")
     else:
-        print(f"To submit: sbatch {script_path}")
+        print(f"\nTo submit: sbatch {symlink_path}")
+        print(f"Or directly: sbatch {script_path}")
+        if args.auto_resubmit:
+            print("\nNote: Auto-resubmit requires --submit flag to monitor job status.")
 
 
 if __name__ == '__main__':

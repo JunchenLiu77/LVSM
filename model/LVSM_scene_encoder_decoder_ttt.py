@@ -788,7 +788,7 @@ class Images2LatentScene(nn.Module):
                 # Use fixed state_lr from config
                 state_lr = self.config.model.ttt.state_lr
 
-            # apply the cosine scheduler to the state_lr
+            # apply the cosine decay to the state_lr
             # def cosine_scheduler(t, s=0.008):
             #     return math.cos((t + s) / (1 + s) * math.pi / 2) ** 2
             # state_lr = state_lr * cosine_scheduler(t)

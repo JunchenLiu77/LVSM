@@ -32,7 +32,7 @@ config = init_config()
 os.environ["OMP_NUM_THREADS"] = str(config.training.get("num_threads", 1))
 
 # Set up DDP for training/inference and Fix random seed
-ddp_info = init_distributed(seed=777)
+ddp_info = init_distributed(seed=config.training.seed)
 dist.barrier()
 
 # Set up wandb and backup source code
@@ -69,7 +69,7 @@ train_set = Dataset(
     num_target_views=config.training.num_target_views, 
     inference=False
 )
-train_sampler = DistributedSampler(train_set)
+train_sampler = DistributedSampler(train_set, seed=config.training.seed)
 train_loader = DataLoader(
     train_set,
     batch_size=config.training.batch_size_per_gpu,

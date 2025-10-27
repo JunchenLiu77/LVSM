@@ -118,34 +118,69 @@ with torch.no_grad(), torch.autocast(
         batch = {k: v.to(ddp_info.device) if type(v) == torch.Tensor else v for k, v in batch.items()}
         if is_ttt:
             for n_iters in iters:
+                real_n_iters = n_iters
+                # if config.model.ttt.progressive:
+                #     # bound the number of iterations by the warmup steps
+                #     real_n_iters = int(1 + (n_iters - 1) * min(1.0, cur_train_step / config.model.ttt.warmup_steps))
                 for i in range(len(enc_views)):
                     n_encoder_views = enc_views[i]
                     n_ss_views = ss_views[i]
-                    input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
-                        batch,
-                        num_input_views=config.training.num_input_views,
-                        num_target_views=config.training.num_target_views,
-                        is_g3r=False, # at inference time, whether using G3R supervision behaves the same.
-                        n_encoder_views=n_encoder_views,
-                        n_ss_views=n_ss_views,
-                        n_iters=n_iters,
-                        has_target_image=True,
-                        target_has_input=False,
-                    )
-                    export_results(input, target, rendered_input, rendered_target, out_dir, compute_metrics=config.inference.get("compute_metrics"), n_encoder_views=n_encoder_views, n_ss_views=n_ss_views, n_iters=n_iters)
-                    del input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
-                    torch.cuda.empty_cache()
+                    if config.model.ttt.supervise_mode != "g3r":
+                        input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
+                            batch,
+                            num_input_views=config.training.num_input_views,
+                            num_target_views=3,
+                            is_g3r=False, # at inference time, whether using G3R supervision behaves the same.
+                            n_encoder_views=n_encoder_views,
+                            n_ss_views=n_ss_views,
+                            n_iters=real_n_iters,
+                            has_target_image=True,
+                            target_has_input=False,
+                        )
+                    else:
+                        input = None
+                        target = None
+                        s = None
+                        full_encoded_latents = None
+                        input_pose_tokens = None
+                        target_pose_tokens = None
+                        
+                        for idx in range(real_n_iters):
+                            is_last = (idx == real_n_iters - 1)
+                            layer_idx = 0
+                            iter_idx = idx % config.model.ttt.n_iters_per_layer
+
+                            # in g3r, input loss metrics and target loss metrics are calculated on the updated state s.
+                            input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics = model(
+                                batch,
+                                num_input_views=config.training.num_input_views,
+                                num_target_views=3,
+                                is_g3r=True,
+                                n_encoder_views=n_encoder_views,
+                                n_ss_views=n_ss_views,
+                                has_target_image=True,
+                                target_has_input=False,
+                                layer_idx=layer_idx,
+                                iter_idx=iter_idx,
+                                input=input,
+                                target=target,
+                                s=s,
+                                full_encoded_latents=full_encoded_latents,
+                                input_pose_tokens=input_pose_tokens,
+                                target_pose_tokens=target_pose_tokens,
+                                is_last=is_last,
+                            )
+                    # export results with the iterations upper bound
+                    export_results(input, target, rendered_input, rendered_target, out_dir, compute_metrics=config.inference.get("compute_metrics"), n_encoder_views=n_encoder_views, n_ss_views=n_ss_views, n_iters=real_n_iters)
         else:
             input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
                 batch,
                 num_input_views=config.training.num_input_views,
-                num_target_views=config.training.num_target_views,
+                num_target_views=3,
                 has_target_image=True,
                 target_has_input=False,
             )
             export_results(input, target, rendered_input, rendered_target, out_dir, compute_metrics=config.inference.get("compute_metrics"))
-            del input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
-            torch.cuda.empty_cache()
     dist.barrier()
     if ddp_info.is_main_process and config.inference.get("compute_metrics", False):
         if is_ttt:

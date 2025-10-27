@@ -32,7 +32,7 @@ config = init_config()
 os.environ["OMP_NUM_THREADS"] = str(config.training.get("num_threads", 1))
 
 # Set up DDP for training/inference and Fix random seed
-ddp_info = init_distributed(seed=777)
+ddp_info = init_distributed(seed=config.training.seed)
 dist.barrier()
 
 # Set up wandb and backup source code
@@ -69,15 +69,13 @@ train_set = Dataset(
     num_target_views=config.training.num_target_views, 
     inference=False
 )
-train_sampler = DistributedSampler(train_set)
+train_sampler = DistributedSampler(train_set, shuffle=True, seed=config.training.seed, drop_last=True)
 train_loader = DataLoader(
     train_set,
     batch_size=config.training.batch_size_per_gpu,
-    shuffle=False,
     num_workers=config.training.num_workers,
     persistent_workers=True,
     pin_memory=False,
-    drop_last=True,
     prefetch_factor=config.training.prefetch_factor,
     sampler=train_sampler,
 )
@@ -173,6 +171,8 @@ if config.training.get("resume_ckpt", "") != "":
         lr_scheduler,
         reset_training_state,
     )
+cur_epoch = int(cur_train_step * (total_batch_size / grad_accum_steps) // len(train_set))
+train_sampler.set_epoch(cur_epoch)
 
 # Apply torch.compile if enabled
 
@@ -208,7 +208,7 @@ model.train()
 
 while cur_train_step <= total_train_steps:
     tic = time.time()
-    cur_epoch = int(cur_train_step * (total_batch_size / grad_accum_steps) // len(train_set) )
+    cur_epoch = int(cur_train_step * (total_batch_size / grad_accum_steps) // len(train_set))
     try:
         # if start_train_step == cur_train_step:
         #     print(f"Current Rank {ddp_info.local_rank} Restarting training from step {cur_train_step}. Resetting train_loader epoch to {cur_epoch}; might take a while...")
@@ -254,7 +254,7 @@ while cur_train_step <= total_train_steps:
         ):
             if is_ttt and config.model.ttt.supervise_mode == "g3r":
                 is_last = (idx == n_iters - 1)
-                layer_idx = idx // config.model.ttt.n_iters_per_layer
+                layer_idx = 0 # always use one layer
                 iter_idx = idx % config.model.ttt.n_iters_per_layer
                 
                 # in g3r, input loss metrics and target loss metrics are calculated on the updated state s.
@@ -477,6 +477,15 @@ while cur_train_step <= total_train_steps:
             torch.save(checkpoint, ckpt_path)
             print(f"Saved checkpoint at step {cur_train_step} to {os.path.abspath(ckpt_path)}")
 
+            # if current ckpt folder has more than 4 checkpoints, delete the oldest one
+            if len(os.listdir(config.training.checkpoint_dir)) > config.training.get('max_checkpoints', 4):
+                ckpts = sorted(
+                    [f for f in os.listdir(config.training.checkpoint_dir) if f.endswith(".pt")],
+                    key=lambda x: int(x.split("_")[1].split(".")[0]),
+                )
+                for ckpt in ckpts[:-config.training.get('max_checkpoints', 4)]:
+                    os.remove(os.path.join(config.training.checkpoint_dir, ckpt))
+
         # export intermediate visualization results
         if export_inter_results:
             vis_path = os.path.join(config.training.checkpoint_dir, f"iter_{cur_train_step:08d}")
@@ -534,7 +543,7 @@ while cur_train_step <= total_train_steps:
                                 
                                 for idx in range(real_n_iters):
                                     is_last = (idx == real_n_iters - 1)
-                                    layer_idx = idx // config.model.ttt.n_iters_per_layer
+                                    layer_idx = 0
                                     iter_idx = idx % config.model.ttt.n_iters_per_layer
 
                                     # in g3r, input loss metrics and target loss metrics are calculated on the updated state s.
@@ -594,6 +603,12 @@ while cur_train_step <= total_train_steps:
                 else:
                     input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim = summarize_evaluation(out_dir)
     
+    # delete all tensors
+    del batch, input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
+    if is_ttt and config.model.ttt.supervise_mode == "g3r":
+        del s, full_encoded_latents, input_pose_tokens, target_pose_tokens
+    if ddp_info.is_main_process:
+        del target_loss_dict, input_loss_dict
     torch.cuda.empty_cache()
     
     if export_inter_results:
