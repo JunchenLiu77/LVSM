@@ -649,7 +649,7 @@ def main():
                         help='Initial value for learnable state_lr (pre-sigmoid), only used when state_lr_mode is "learnable"')
     parser.add_argument('--state-lr', type=float,
                         help='TTT state learning rate (encoder-decoder-ttt)')
-    parser.add_argument('--opt-model', choices=['mlp', 'transformer', 'flatten_mlp', 'transformer2', 'transformer3', 'adam'],
+    parser.add_argument('--opt-model', choices=['mlp', 'transformer', 'flatten_mlp', 'transformer2', 'transformer3', 'adam', 'dit'],
                         help='TTT optimization model (encoder-decoder-ttt)')
     parser.add_argument('--is-residual', action='store_true', default=None,
                         help='Enable residual connection in TTT (encoder-decoder-ttt)')

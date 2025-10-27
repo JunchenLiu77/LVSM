@@ -256,6 +256,7 @@ while cur_train_step <= total_train_steps:
                 is_last = (idx == n_iters - 1)
                 layer_idx = 0 # always use one layer
                 iter_idx = idx % config.model.ttt.n_iters_per_layer
+                t = idx / n_iters
                 
                 # in g3r, input loss metrics and target loss metrics are calculated on the updated state s.
                 input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics = model(
@@ -269,6 +270,7 @@ while cur_train_step <= total_train_steps:
                     target_has_input=config.training.target_has_input,
                     layer_idx=layer_idx,
                     iter_idx=iter_idx,
+                    t=t,
                     input=input,
                     target=target,
                     s=s,
@@ -545,6 +547,7 @@ while cur_train_step <= total_train_steps:
                                     is_last = (idx == real_n_iters - 1)
                                     layer_idx = 0
                                     iter_idx = idx % config.model.ttt.n_iters_per_layer
+                                    t = idx / real_n_iters
 
                                     # in g3r, input loss metrics and target loss metrics are calculated on the updated state s.
                                     input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics = model(
@@ -558,6 +561,7 @@ while cur_train_step <= total_train_steps:
                                         target_has_input=False,
                                         layer_idx=layer_idx,
                                         iter_idx=iter_idx,
+                                        t=t,
                                         input=input,
                                         target=target,
                                         s=s,

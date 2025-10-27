@@ -178,6 +178,23 @@ class Images2LatentScene(nn.Module):
 
 
     def _init_ttt(self):
+        if self.config.model.ttt.opt_model == "dit":
+            # Using DiT architecture to update the state, we dont explicitly update the state with some certain learning rate, 
+            # instead, we use the DiT architecture to update the state and modulate the update with current time step.
+            from .dit import DiT
+
+            # Initialization will be done in the DiT class
+            self.ttt_blocks = nn.ModuleList([DiT(
+                hidden_size=self.config.model.transformer.d * 2,
+                depth=self.config.model.ttt.n_blocks_per_layer,
+                num_heads=self.config.model.transformer.d * 2 // self.config.model.transformer.d_head,
+                mlp_ratio=4.0
+            ) for _ in range(self.config.model.ttt.n_layer)])
+            self.ttt_grad_normalizers = nn.ModuleList([nn.LayerNorm(self.config.model.transformer.d, bias=False) for _ in range(self.config.model.ttt.n_layer)])
+            # initialize the state normalizer to be identity
+            self.ttt_state_normalizers = nn.ModuleList([nn.Identity() for _ in range(self.config.model.ttt.n_layer)])
+            return
+        
         # Initialize state learning rate based on configuration
         state_lr_mode = self.config.model.ttt.state_lr_mode
         if state_lr_mode == 'learnable':
@@ -741,8 +758,8 @@ class Images2LatentScene(nn.Module):
                     opt_input_s = state_norm(opt_input_s)
 
                     # log the scale factor of the normalizer
-                    if (isinstance(state_norm, nn.RMSNorm) or isinstance(state_norm, nn.LayerNorm)) and state_norm.elementwise_affine:
-                        layer_metrics["state_norm_scaler"] = state_norm.weight.mean().item()
+                    # if (isinstance(state_norm, nn.RMSNorm) or isinstance(state_norm, nn.LayerNorm)) and state_norm.elementwise_affine:
+                    #     layer_metrics["state_norm_scaler"] = state_norm.weight.mean().item()
 
                     # log the opt input state -- state after normalizer
                     layer_metrics["opt_state_max"] = torch.max(opt_input_s).item()
@@ -751,16 +768,25 @@ class Images2LatentScene(nn.Module):
 
                     opt_input = torch.cat((opt_input_s, grad_s_normed), dim=-1) # [b, n_latent_vectors, 2*d]
 
-                delta_s = opt(opt_input) # [b, n_latent_vectors, d]
+                if self.config.model.ttt.opt_model == "dit":
+                    # inject the time step also
+                    t_vec = torch.full((opt_input.shape[0],), t, device=opt_input.device)
+                    delta_s = opt(opt_input, t_vec) # [b, n_latent_vectors, 2*d]
+                else:    
+                    delta_s = opt(opt_input) # [b, n_latent_vectors, d]
 
                 # pull delta_s to the same domain as s
                 # print(f"delta_s mean: {delta_s.mean().item()}, delta_s std: {delta_s.std().item()}")
                 # delta_s = (delta_s - delta_s.mean(dim=(-1), keepdim=True)) / (delta_s.std(dim=(-1), keepdim=True) + 1e-10)
                 # delta_s = delta_s * (s_std + 1e-10) + s_mean
-                delta_s = delta_s / (delta_s.std(dim=(-1), keepdim=True) + 1e-10) * s_std
+                if not self.config.model.ttt.opt_model == "dit":
+                    delta_s = delta_s / (delta_s.std(dim=(-1), keepdim=True) + 1e-10) * s_std
                 # delta_s = delta_s * s_std
             
             # get the effective state_lr for this layer
+            if self.config.model.ttt.opt_model == "dit":
+                assert self.config.model.ttt.state_lr_mode == "fixed", f"expect state_lr_mode to be fixed for DiT, but got {self.config.model.ttt.state_lr_mode}"
+                assert self.config.model.ttt.state_lr == 1.0, f"expect state_lr to be 1.0 for DiT, but got {self.config.model.ttt.state_lr}"
             if self.config.model.ttt.state_lr_mode == "learnable":
                 assert lrnet is not None, "lrnet is required for learnable state_lr"
                 # Use learnable state_lr with sigmoid activation
@@ -797,10 +823,12 @@ class Images2LatentScene(nn.Module):
             s_update = delta_s * state_lr
             
             # Apply update
-            if self.config.model.ttt.is_residual:
+            if self.config.model.ttt.is_residual and self.config.model.ttt.opt_model != "dit":
                 new_s = s_update + (s.detach() if self.config.model.ttt.detach_residual else s)
                 # pull the new s to the same domain as previous s
                 new_s = new_s / (new_s.std(dim=(-1), keepdim=True) + 1e-10) * s_std
+            else:
+                new_s = s_update[..., :self.config.model.transformer.d]
 
             # log state statistics
             layer_metrics["state_max"] = torch.max(new_s).item()
@@ -960,7 +988,7 @@ class Images2LatentScene(nn.Module):
         return input, target, last_input_loss_metrics, last_target_loss_metrics, last_distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
 
 
-    def ttt_forward_g3r(self, input, target, layer_idx, iter_idx, n_encoder_views, n_ss_views, s=None, full_encoded_latents=None, input_pose_tokens=None, target_pose_tokens=None, is_last=False):
+    def ttt_forward_g3r(self, input, target, layer_idx, iter_idx, t, n_encoder_views, n_ss_views, s=None, full_encoded_latents=None, input_pose_tokens=None, target_pose_tokens=None, is_last=False):
         """
         Forward the latent tokens with the TTT blocks for G3R supervision. Returns the updated state and TTT metrics for logging.
         Args:
@@ -1007,8 +1035,7 @@ class Images2LatentScene(nn.Module):
 
         new_s, grad_s, layer_metrics = self._update_state_with_loss(
             s, s, grad_norm, state_norm, opt, ss_loss_metrics["loss"], lrnet,
-            need_grad=True,
-            t=iter_idx/(self.config.model.ttt.n_layer * self.config.model.ttt.n_iters_per_layer),
+            need_grad=True, t=t
         )
 
         if self.config.model.ttt.enable_unroll:
@@ -1056,7 +1083,7 @@ class Images2LatentScene(nn.Module):
         return input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics
 
 
-    def forward(self, data_batch, num_input_views, num_target_views, is_g3r, has_target_image=True, target_has_input=False, layer_idx=None, iter_idx=None, n_encoder_views=None, n_ss_views=None, n_iters=None, **kwargs):
+    def forward(self, data_batch, num_input_views, num_target_views, is_g3r, has_target_image=True, target_has_input=False, layer_idx=None, iter_idx=None, t=None, n_encoder_views=None, n_ss_views=None, n_iters=None, **kwargs):
         assert has_target_image, "JC: we might need to support this?"
         if kwargs.get("input") is None or kwargs.get("target") is None:
             if "input" in kwargs:
@@ -1069,7 +1096,7 @@ class Images2LatentScene(nn.Module):
         
         if is_g3r:
             assert layer_idx is not None and iter_idx is not None, "layer_idx and iter_idx must be provided for G3R supervision"
-            return self.ttt_forward_g3r(input, target, layer_idx, iter_idx, n_encoder_views, n_ss_views, **kwargs)
+            return self.ttt_forward_g3r(input, target, layer_idx, iter_idx, t, n_encoder_views, n_ss_views, **kwargs)
         else:    
             return self.ttt_forward(input, target, n_encoder_views, n_ss_views, n_iters)
 
