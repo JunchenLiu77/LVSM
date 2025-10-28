@@ -1,6 +1,7 @@
 metric_checkpoint
 pretrained_models
 preprocessed_data
+re10k_preprocessed/
 experiments/
 log/
 configs/api_keys.yaml

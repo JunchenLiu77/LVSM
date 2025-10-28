@@ -31,7 +31,7 @@ def process_single_file(args):
 def process_torch_file(file_path, output_dir):
     """
     Process a .torch file and save images and poses
-    
+    import multiprocessing as mp
     Args:
         file_path (str): Path to the .torch file
         output_dir (str): Base directory to save outputs
