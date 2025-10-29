@@ -469,7 +469,7 @@ class Images2LatentScene(nn.Module):
             return torch.cat([images * 2.0 - 1.0, pose_cond], dim=2)
 
 
-    def encode(self, input, n_encoder_views):
+    def encode(self, input):
         """
         Encode the light_field_latent into latent_tokens with input posed images.
         """
@@ -480,51 +480,27 @@ class Images2LatentScene(nn.Module):
         posed_input_images = self.get_posed_input(
             images=input.image, ray_o=input.ray_o, ray_d=input.ray_d
         )
-        b, _, c, h, w = posed_input_images.size()
+        b, v_input, c, h, w = posed_input_images.size()
 
-        # latent token with only using the first n_encoder_inputs input views
-        v_input = n_encoder_views
-        partial_posed_input_images = posed_input_images[:, :v_input, ...]
-        input_img_tokens = self.image_tokenizer(partial_posed_input_images)  # [b*v, n_patches, d]
+        input_img_tokens = self.image_tokenizer(posed_input_images)  # [b*v, n_patches, d]
         _, n_patches, d = input_img_tokens.size()  # [b*v, n_patches, d]
         input_img_tokens = input_img_tokens.reshape(b, v_input * n_patches, d)  # [b, v*n_patches, d]
         latent_vector_tokens = self.n_light_field_latent.expand(b, -1, -1) # [b, n_latent_vectors, d]
         encoder_input_tokens = torch.cat((latent_vector_tokens, input_img_tokens), dim=1) # [b, n_latent_vectors + v*n_patches, d]
         intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
-        partial_encoded_latents, input_img_tokens = intermediate_tokens.split([n_latent_vectors, v_input * n_patches], dim=1) # [b, n_latent_vectors, d], [b, v*n_patches, d]
-        
-        full_encoded_latents = None
-        if self.config.model.ttt.distill_factor > 0.0:
-            # latent token with using all input views, which provide teacher signal for distillation
-            if n_encoder_views == posed_input_images.size(1):
-                # have already used all input views in partial_encoded_latents
-                full_encoded_latents = partial_encoded_latents
-            else:
-                v_input = posed_input_images.size(1)
-                input_img_tokens = self.image_tokenizer(posed_input_images)  # [b*v, n_patches, d]
-                _, n_patches, d = input_img_tokens.size()  # [b*v, n_patches, d]
-                input_img_tokens = input_img_tokens.reshape(b, v_input * n_patches, d)  # [b, v*n_patches, d]
-                latent_vector_tokens = self.n_light_field_latent.expand(b, -1, -1) # [b, n_latent_vectors, d]
-                encoder_input_tokens = torch.cat((latent_vector_tokens, input_img_tokens), dim=1) # [b, n_latent_vectors + v*n_patches, d]
-                intermediate_tokens = self.pass_layers(self.transformer_encoder, encoder_input_tokens, gradient_checkpoint=self.config.training.grad_checkpoint, checkpoint_every=checkpoint_every)
-                full_encoded_latents, input_img_tokens = intermediate_tokens.split([n_latent_vectors, v_input * n_patches], dim=1) # [b, n_latent_vectors, d], [b, v*n_patches, d]
-        
-        return partial_encoded_latents, full_encoded_latents
+        encoded_latents, input_img_tokens = intermediate_tokens.split([n_latent_vectors, v_input * n_patches], dim=1) # [b, n_latent_vectors, d], [b, v*n_patches, d]
+        return encoded_latents
 
 
-    def decode(self, target, latent_tokens, target_pose_tokens=None, last_n=None):
+    def decode(self, target, latent_tokens, target_pose_tokens=None):
         """
         Decode the target view images with the latent tokens and target poses.
         """
         checkpoint_every = self.config.training.grad_checkpoint_every
         n_latent_vectors = self.config.model.transformer.n_latent_vectors
         b, v_target = target.image.size()[:2]
-        if last_n is not None:
-            v_target = last_n
-        
         if target_pose_tokens is None:
             target_pose_cond = self.get_posed_input(ray_o=target.ray_o, ray_d=target.ray_d)  # [b, v_target, c, h, w]
-            target_pose_cond = target_pose_cond[:, -v_target:, ...]
             target_pose_tokens = self.target_pose_tokenizer(target_pose_cond)  # [b*v_target, n_patches, d]
         
         _, n_patches, d = target_pose_tokens.size()
@@ -576,77 +552,6 @@ class Images2LatentScene(nn.Module):
 
         rendered_images = torch.cat(rendered_chunks, dim=1)  # [b, v_target, c, H, W]
         return rendered_images, target_pose_tokens
-
-
-    def _compute_ttt_loss(
-        self, 
-        s, 
-        input, 
-        target, 
-        n_ss_views,
-        full_encoded_latents=None, 
-        input_pose_tokens=None, 
-        target_pose_tokens=None, 
-        compute_target_loss=False,
-        input_need_grad=False,
-        target_need_grad=False,
-    ):
-        """
-        Compute losses for TTT layer.
-        
-        Args:
-            s: Current state tensor [b, n_latent_vectors, d]
-            input: Input batch data
-            target: Target batch data
-            full_encoded_latents: (Optional) Full encoded latents for distillation
-            input_pose_tokens: (Optional) Cached pose tokens for input views
-            target_pose_tokens: (Optional) Cached pose tokens for target views
-            compute_target_loss: (Optional) Whether to compute target loss
-            input_need_grad: Whether to keep tracking gradients for input loss
-            target_need_grad: Whether to keep tracking gradients for target loss
-        
-        Returns:
-            Tuple of (decoder_input, input_loss, target_loss, distillation_loss, layer_metrics, input_pose_tokens, target_pose_tokens)
-        """
-        if self.config.model.ttt.detach_decoder_input:
-            # If detach decoder input, the gradient will not flow into the decoder input.
-            decoder_input = s.detach().requires_grad_(True)
-        else:
-            decoder_input = s
-
-        layer_metrics = {}
-        
-        # render input views and compute input loss
-        # with (torch.no_grad() if not input_need_grad else torch.enable_grad()), torch.autocast(enabled=self.config.training.use_amp, device_type="cuda", dtype=amp_dtype_mapping[self.config.training.amp_dtype]):
-        # with nullcontext():
-        with torch.enable_grad():
-            rendered_input, input_pose_tokens = self.decode(
-                input, 
-                decoder_input, 
-                target_pose_tokens=input_pose_tokens, 
-                last_n=n_ss_views,
-            )
-            input_loss_metrics = self.loss_computer(rendered_input, input.image[:, -n_ss_views:, ...])
-            layer_metrics["input_loss"] = input_loss_metrics["loss"].item()
-
-        # render target views and compute target loss
-        rendered_target = None
-        target_loss_metrics = None
-        if self.config.model.ttt.supervise_mode == "average" or self.config.model.ttt.supervise_mode == "g3r" or compute_target_loss:
-            # with (torch.no_grad() if not target_need_grad else torch.enable_grad()), torch.autocast(enabled=self.config.training.use_amp, device_type="cuda", dtype=amp_dtype_mapping[self.config.training.amp_dtype]):
-            # with nullcontext():
-            rendered_target, target_pose_tokens = self.decode(target, decoder_input, target_pose_tokens=target_pose_tokens)
-            target_loss_metrics = self.loss_computer(rendered_target, target.image)
-            layer_metrics["target_loss"] = target_loss_metrics["loss"].item()
-        
-        # compute the distillation loss
-        distillation_loss = None
-        if self.config.model.ttt.distill_factor > 0.0:
-            assert full_encoded_latents is not None, "full_encoded_latents is required for distillation"
-            distillation_loss = F.mse_loss(s, full_encoded_latents)
-            layer_metrics["distillation_loss"] = distillation_loss.item()
-        
-        return decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, layer_metrics, input_pose_tokens, target_pose_tokens, rendered_input, rendered_target
 
 
     def _update_state_with_loss(
@@ -844,165 +749,57 @@ class Images2LatentScene(nn.Module):
         return new_s, grad_s, layer_metrics
 
 
-    def ttt_forward(self, input, target, n_encoder_views=None, n_ss_views=None, n_iters=None):
-        """
-        Update the latent tokens with the TTT blocks. Returns the updated state and TTT metrics for logging.
-        Args:
-            input: Input data batch
-            target: Target data batch
-        Returns:
-            s: Updated latent tokens [b, n_latent_vectors, d]
-            ttt_metrics: TTT metrics
-        """
-        ttt_metrics = {}
-
-        # sample input views and ss views used
-        n_encoder_views = random.randint(self.config.model.ttt.n_encoder_inputs_min, self.config.model.ttt.n_encoder_inputs_max) if n_encoder_views is None else n_encoder_views
-        n_ss_views = random.randint(self.config.model.ttt.n_ss_inputs_min, self.config.model.ttt.n_ss_inputs_max) if n_ss_views is None else n_ss_views
-        ttt_metrics["n_encoder_views"] = n_encoder_views
-        ttt_metrics["n_ss_views"] = n_ss_views
-
-        # sample ttt iterations per layer
-        if self.config.model.ttt.supervise_mode == "random_last":
-            n_iters = random.randint(self.config.model.ttt.min_layer, self.config.model.ttt.max_layer) if n_iters is None else n_iters
-        else:
-            n_iters = self.config.model.ttt.n_iters_per_layer if n_iters is None else n_iters
-
-        partial_encoded_latents, full_encoded_latents = self.encode(input, n_encoder_views)
-        s = partial_encoded_latents
-        if self.config.model.ttt.detach_s0:
-            # If detach s0, the gradient will not flow into encoder, tokenizer and the register_token.
-            # We need to detach s but then make it require grad again for autograd.grad to work
-            s = s.detach().requires_grad_(True)
-
-        # iterate over layers and iterations
-        input_pose_tokens = None
-        target_pose_tokens = None
-        ttt_metrics["layers"] = []
-        
-        losses = []
-        if self.config.model.ttt.enable_unroll:
-            cur_ss_loss = 1e10
-            # prev_s = s # this will be triggered by the first layer
-        
-        for layer_idx in range(self.config.model.ttt.n_layer):
-            for iter_idx in range(n_iters):
-                # input: always need gradient -- We need to calculate gradient later.
-                # target:
-                # - training time: only when supervise average need gradient.
-                # - inference time: no need gradient.
-                s = s.requires_grad_(True)
-                decoder_input, input_loss_metrics, target_loss_metrics, distillation_loss, loss_metrics, input_pose_tokens, target_pose_tokens, _, _ = self._compute_ttt_loss(
-                    s, input, target, n_ss_views, full_encoded_latents, input_pose_tokens, target_pose_tokens,
-                    input_need_grad=True,
-                    target_need_grad=self.config.model.ttt.supervise_mode == "average" and self.config.training.supervision == "target" and not self.config.inference.if_inference,
-                )
-                
-                # if the input loss is bigger, unroll the state
-                if self.config.model.ttt.enable_unroll:
-                    if input_loss_metrics["loss"] > cur_ss_loss:
-                        s = prev_s
-                        # break # no longer update the state # will update state with smaller learning rate
-                    else:
-                        cur_ss_loss = input_loss_metrics["loss"]
-                        prev_s = s
-
-                if self.config.model.ttt.supervise_mode == "average":
-                    if self.config.training.supervision == "input":
-                        loss = input_loss_metrics["loss"]
-                    elif self.config.training.supervision == "target":
-                        loss = target_loss_metrics["loss"]
-                    if self.config.model.ttt.distill_factor > 0.0:
-                        loss += distillation_loss * self.config.model.ttt.distill_factor
-                    losses.append(loss)
-                
-                # Update state with self-supervision losses
-                grad_norm = self.ttt_grad_normalizers[layer_idx]
-                state_norm = self.ttt_state_normalizers[layer_idx]
-                opt = self.ttt_blocks[layer_idx]
-                lrnet = None
-                if self.config.model.ttt.state_lr_mode in ["learnable"] or "adaptive" in self.config.model.ttt.state_lr_mode:
-                    lrnet = self.ttt_lrnet[layer_idx]
-                
-                # training time: if detach middle, we dont keep tracking gradients before the last layer
-                # inference time: always dont keep tracking gradients
-                s, grad_s, update_metrics = self._update_state_with_loss(
-                    s, decoder_input, grad_norm, state_norm, opt, input_loss_metrics["loss"], lrnet,
-                    need_grad=(not self.config.model.ttt.detach_middle or (iter_idx == n_iters - 1)) and not self.config.inference.if_inference,
-                    t=iter_idx/n_iters,
-                )
-                
-                # Merge metrics
-                layer_metrics = {**loss_metrics, **update_metrics}
-                ttt_metrics['layers'].append(layer_metrics)
-
-                if self.config.model.ttt.detach_middle and (iter_idx != n_iters - 1):
-                    s = s.detach()
-
-                # debug: print the memory usage after each update
-                # print(f"[{layer_idx}, {iter_idx}]: allocated: {torch.cuda.memory_allocated() / 1024**3:.2f}GB, cached memory: {torch.cuda.memory_reserved() / 1024**3:.2f}GB")
-
-        # if unroll is enabled, we count the number of iterations used
-        ttt_metrics["n_iters"] = iter_idx + 1 if n_iters > 0 else 0
-
-        # Compute the last layer losses
-        # input: dont need gradient unless supervise input at training time
-        # target: always need gradient if supervise target at training time.
-        decoder_input, last_input_loss_metrics, last_target_loss_metrics, last_distillation_loss, last_layer_metrics, _, _, _, rendered_target = self._compute_ttt_loss(
-            s, input, target, n_ss_views, full_encoded_latents, 
-            input_pose_tokens=None, 
-            target_pose_tokens=target_pose_tokens, 
-            compute_target_loss=True,
-            input_need_grad=self.config.training.supervision == "input" and not self.config.inference.if_inference,
-            target_need_grad=self.config.training.supervision == "target" and not self.config.inference.if_inference,
-        )
-        if self.config.model.ttt.enable_unroll:
-            if last_input_loss_metrics["loss"] > cur_ss_loss:
-                s = prev_s
-            else:
-                cur_ss_loss = last_input_loss_metrics["loss"]
-                prev_s = s
-
-        if self.config.training.supervision == "input":
-            loss = last_input_loss_metrics["loss"]
-        elif self.config.training.supervision == "target":
-            loss = last_target_loss_metrics["loss"]
-        if self.config.model.ttt.distill_factor > 0.0:
-            loss += last_distillation_loss * self.config.model.ttt.distill_factor
-        losses.append(loss)
-
-        # TODO: hacky replacing
-        # Render full input images, only for visualization
-        with torch.no_grad(), torch.autocast(enabled=self.config.training.use_amp, device_type="cuda", dtype=amp_dtype_mapping[self.config.training.amp_dtype]):
-        # with nullcontext():
-            rendered_input, _ = self.decode(input, decoder_input)
-        
-        ttt_metrics["last_input_loss"] = last_layer_metrics["input_loss"]
-        ttt_metrics["last_target_loss"] = last_layer_metrics["target_loss"]
-        if self.config.model.ttt.distill_factor > 0.0:
-            ttt_metrics["last_distillation_loss"] = last_layer_metrics["distillation_loss"]
-
-        loss = sum(losses) / len(losses)
-        ttt_metrics["loss"] = loss.item()
-
-        return input, target, last_input_loss_metrics, last_target_loss_metrics, last_distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
+    def ttt_forward(self, input, target, ss, ood_target, n_iters=None):
+        raise NotImplementedError("TTT forward is not updated yet")
+        return None
 
 
-    def ttt_forward_g3r(self, input, target, layer_idx, iter_idx, t, n_encoder_views, n_ss_views, s=None, full_encoded_latents=None, input_pose_tokens=None, target_pose_tokens=None, is_last=False):
+    def ttt_forward_g3r(
+        self, 
+        input, 
+        target, 
+        ss, 
+        ood_target, 
+        layer_idx, 
+        iter_idx, 
+        t, 
+        s=None, 
+        ss_pose_tokens=None, 
+        target_pose_tokens=None, 
+        ood_target_pose_tokens=None, 
+        is_last=False
+    ):
         """
         Forward the latent tokens with the TTT blocks for G3R supervision. Returns the updated state and TTT metrics for logging.
         Args:
             input: Input data batch
             target: Target data batch
+            ss: Self-supervision data batch
+            ood_target: OOD target data batch
+            input: Input data batch
+            target: Target data batch
             layer_idx: Layer index
             iter_idx: Iteration index
+            t: Time step
             s: (Optional) Current state tensor [b, n_latent_vectors, d]
-            full_encoded_latents: (Optional) Latent tokens with using all input views [b, n_latent_vectors, d]
             input_pose_tokens: (Optional) Cached pose tokens for input views
             target_pose_tokens: (Optional) Cached pose tokens for target views
-            update: Whether to update the state
+            is_last: Whether to update the state
         Returns:
-            s: Updated latent tokens [b, n_latent_vectors, d]
+            input_loss_metrics: Input loss metrics, only calculated on the last iteration
+            target_loss_metrics: Target loss metrics, calculated on the updated state
+            ss_loss_metrics: Self-supervision loss metrics, calculated on the state before update
+            ood_target_loss_metrics: OOD target loss metrics, calculated on the updated state
+            rendered_input: Rendered input
+            rendered_target: Rendered target
+            rendered_ss: Rendered self-supervision
+            rendered_ood_target: Rendered OOD target
+            loss: Total loss
+            s: Updated state
+            ss_pose_tokens: Cached pose tokens for self-supervision views
+            target_pose_tokens: Cached pose tokens for target for target views
+            ood_target_pose_tokens: Cached pose tokens for OOD target for OOD target views
+            layer_metrics: Layer metrics
         """
         assert self.config.model.ttt.supervise_mode == "g3r", "supervise_mode must be g3r for G3R supervision"
         assert layer_idx is not None and iter_idx is not None, "layer_idx and iter_idx must be provided for G3R supervision"
@@ -1010,20 +807,16 @@ class Images2LatentScene(nn.Module):
 
         if s is None:
             assert layer_idx == 0 and iter_idx == 0, "layer_idx and iter_idx must be 0 for G3R supervision when s is not provided"
-            partial_encoded_latents, full_encoded_latents = self.encode(input, n_encoder_views)
-            s = partial_encoded_latents
+            # use encoder to absorb input views
+            s = self.encode(input)
         
         s = s.detach().requires_grad_(True)
 
         # Compute self-supervision losses which is calculated on the input views.
         with torch.enable_grad():
-            rendered_input, input_pose_tokens = self.decode(
-                input, 
-                s, 
-                target_pose_tokens=input_pose_tokens, 
-                last_n=n_ss_views,
-            )
-            ss_loss_metrics = self.loss_computer(rendered_input, input.image[:, -n_ss_views:, ...])
+            # calculate ss loss
+            rendered_ss, ss_pose_tokens = self.decode(ss, s, target_pose_tokens=ss_pose_tokens)
+            ss_loss_metrics = self.loss_computer(rendered_ss, ss.image)
         
         # Update state with self-supervision losses except for the last layer
         grad_norm = self.ttt_grad_normalizers[layer_idx]
@@ -1041,12 +834,11 @@ class Images2LatentScene(nn.Module):
         if self.config.model.ttt.enable_unroll:
             # compute the ss loss again with the new state, we dont need gradient this time
             with torch.no_grad():
-                rendered_input, _ = self.decode(
-                    input, new_s,
-                    target_pose_tokens=input_pose_tokens, 
-                    last_n=n_ss_views,
+                rendered_ss, _ = self.decode(
+                    ss, new_s,
+                    target_pose_tokens=ss_pose_tokens, 
                 )
-                new_ss_loss_metrics = self.loss_computer(rendered_input, input.image[:, -n_ss_views:, ...])
+                new_ss_loss_metrics = self.loss_computer(rendered_ss, ss.image)
             
             # only update state if the new ss loss is smaller
             if new_ss_loss_metrics["loss"] < ss_loss_metrics["loss"]:
@@ -1060,8 +852,9 @@ class Images2LatentScene(nn.Module):
             s = new_s
 
         if is_last:
-            # render and calculate the input loss on all input views
+            # render input views, only for visualization
             with torch.no_grad():
+                # we only calculate the input loss once per data sample so we dont cache it during training.
                 rendered_input, _ = self.decode(input, s)
                 input_loss_metrics = self.loss_computer(rendered_input, input.image)
                 layer_metrics["input_loss"] = input_loss_metrics["loss"].item()
@@ -1070,35 +863,69 @@ class Images2LatentScene(nn.Module):
             input_loss_metrics = None
             layer_metrics["input_loss"] = 0.0
         
+        # calculate loss on target and ood target views
         rendered_target, target_pose_tokens = self.decode(target, s, target_pose_tokens=target_pose_tokens)
         target_loss_metrics = self.loss_computer(rendered_target, target.image)
         layer_metrics["target_loss"] = target_loss_metrics["loss"].item()
 
-        distillation_loss = None
-        if self.config.training.supervision == "input":
-            loss = input_loss_metrics["loss"]
-        elif self.config.training.supervision == "target":
-            loss = target_loss_metrics["loss"]
+        rendered_ood_target, ood_target_pose_tokens = self.decode(ood_target, s, target_pose_tokens=ood_target_pose_tokens)
+        ood_target_loss_metrics = self.loss_computer(rendered_ood_target, ood_target.image)
+        layer_metrics["ood_target_loss"] = ood_target_loss_metrics["loss"].item()
 
-        return input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics
+        assert self.config.training.supervision == "target", "supervision must be target for G3R supervision"
+        loss = target_loss_metrics["loss"] + ood_target_loss_metrics["loss"]
+
+        # return loss metrics, rendered images, loss, updated state, pose tokens, and layer metrics
+        return input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss, s, ss_pose_tokens, target_pose_tokens, ood_target_pose_tokens, layer_metrics
 
 
-    def forward(self, data_batch, num_input_views, num_target_views, is_g3r, has_target_image=True, target_has_input=False, layer_idx=None, iter_idx=None, t=None, n_encoder_views=None, n_ss_views=None, n_iters=None, **kwargs):
+    def forward(
+        self, 
+        data_batch, 
+        num_input_views, 
+        num_target_views, 
+        num_ss_views, 
+        num_ood_target_views,
+        is_g3r, 
+        has_target_image=True, 
+        training=True, 
+        layer_idx=None, 
+        iter_idx=None, 
+        t=None, 
+        n_iters=None, 
+        **kwargs
+    ):
         assert has_target_image, "JC: we might need to support this?"
-        if kwargs.get("input") is None or kwargs.get("target") is None:
+        if kwargs.get("input") is None or kwargs.get("target") is None or kwargs.get("ss") is None or kwargs.get("ood_target") is None:
             if "input" in kwargs:
                 kwargs.pop("input")
             if "target" in kwargs:
                 kwargs.pop("target")
-            input, target = self.process_data(data_batch, num_input_views=num_input_views, num_target_views=num_target_views, has_target_image=has_target_image, target_has_input=target_has_input, compute_rays=True)
+            if "ss" in kwargs:
+                kwargs.pop("ss")
+            if "ood_target" in kwargs:
+                kwargs.pop("ood_target")
+            input, target, ss, ood_target = self.process_data(
+                data_batch, 
+                num_input_views=num_input_views, 
+                num_target_views=num_target_views, 
+                num_ss_views=num_ss_views, 
+                num_ood_target_views=num_ood_target_views, 
+                has_target_image=has_target_image, 
+                training=training, 
+                compute_rays=True
+            )
         else:
-            input, target = kwargs.pop("input"), kwargs.pop("target")
+            input, target, ss, ood_target = kwargs.pop("input"), kwargs.pop("target"), kwargs.pop("ss"), kwargs.pop("ood_target")
         
         if is_g3r:
             assert layer_idx is not None and iter_idx is not None, "layer_idx and iter_idx must be provided for G3R supervision"
-            return self.ttt_forward_g3r(input, target, layer_idx, iter_idx, t, n_encoder_views, n_ss_views, **kwargs)
+            assert layer_idx == 0, "G3R always use the same optimizer network"
+            forward_res = self.ttt_forward_g3r(input, target, ss, ood_target, layer_idx, iter_idx, t, **kwargs)
+            return input, target, ss, ood_target, *forward_res
         else:    
-            return self.ttt_forward(input, target, n_encoder_views, n_ss_views, n_iters)
+            forward_res = self.ttt_forward(input, target, ss, ood_target, n_iters)
+            return input, target, ss, ood_target, *forward_res
 
 
     @torch.no_grad()
@@ -1119,7 +946,7 @@ class Images2LatentScene(nn.Module):
     
         raise NotImplementedError("Need some closer look here.")
         if data_batch.input is None:
-            input, target = self.process_data(data_batch, has_target_image=False, target_has_input=self.config.training.target_has_input, compute_rays=True)
+            ss, input, target = self.process_data(data_batch, num_ss_views=num_ss_views, num_input_views=num_input_views, num_target_views=num_target_views, has_target_image=False, training=False, compute_rays=True)
             data_batch = edict(input=input, target=target)
         else:
             input, target = data_batch.input, data_batch.target

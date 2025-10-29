@@ -67,6 +67,10 @@ train_set = Dataset(
     dataset_path="/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/train/full_list.txt", 
     num_input_views=config.training.num_input_views, 
     num_target_views=config.training.num_target_views, 
+    num_ss_views=config.training.num_ss_views,
+    num_ood_target_views=config.training.num_ood_target_views,
+    min_dist=25,
+    max_dist=100,
     inference=False
 )
 train_sampler = DistributedSampler(train_set, shuffle=True, seed=config.training.seed, drop_last=True)
@@ -88,6 +92,10 @@ if config.training.test_every > 0:
         dataset_path="/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/test/full_list.txt", 
         num_input_views=2,
         num_target_views=3,
+        num_ss_views=config.training.num_ss_views,
+        num_ood_target_views=config.training.num_ood_target_views,
+        min_dist=25,
+        max_dist=100,
         inference=True
     )
     test_sampler = DistributedSampler(test_set)
@@ -233,18 +241,14 @@ while cur_train_step <= total_train_steps:
             n_iters = int(1 + (n_iters - 1) * min(1.0, cur_train_step / config.model.ttt.warmup_steps))
         input = None
         target = None
+        ss = None
+        ood_target = None
         s = None
-        full_encoded_latents = None
-        input_pose_tokens = None
+        ss_pose_tokens = None
         target_pose_tokens = None
+        ood_target_pose_tokens = None
         ttt_metrics = {"layers": []}
-
-        # determine the number of encoder and ss views used
-        n_encoder_views = random.randint(config.model.ttt.n_encoder_inputs_min, config.model.ttt.n_encoder_inputs_max)
-        n_ss_views = random.randint(config.model.ttt.n_ss_inputs_min, config.model.ttt.n_ss_inputs_max)
-        ttt_metrics["n_encoder_views"] = n_encoder_views
-        ttt_metrics["n_ss_views"] = n_ss_views
-        ttt_metrics["n_iters"] = n_iters # only update for n_iters times
+        ttt_metrics["n_iters"] = n_iters
     
     for idx in range(n_iters):
         with torch.autocast(
@@ -259,44 +263,41 @@ while cur_train_step <= total_train_steps:
                 t = idx / n_iters
                 
                 # in g3r, input loss metrics and target loss metrics are calculated on the updated state s.
-                input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics = model(
+                input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss, s, ss_pose_tokens, target_pose_tokens, ood_target_pose_tokens, layer_metrics = model(
                     batch,
                     num_input_views=config.training.num_input_views,
                     num_target_views=config.training.num_target_views,
+                    num_ss_views=config.training.num_ss_views,
+                    num_ood_target_views=config.training.num_ood_target_views,
                     is_g3r=True,
-                    n_encoder_views=n_encoder_views,
-                    n_ss_views=n_ss_views,
                     has_target_image=True,
-                    target_has_input=config.training.target_has_input,
+                    training=True,
                     layer_idx=layer_idx,
                     iter_idx=iter_idx,
                     t=t,
                     input=input,
                     target=target,
+                    ss=ss,
+                    ood_target=ood_target,
                     s=s,
-                    full_encoded_latents=full_encoded_latents,
-                    input_pose_tokens=input_pose_tokens,
+                    ss_pose_tokens=ss_pose_tokens,
                     target_pose_tokens=target_pose_tokens,
+                    ood_target_pose_tokens=ood_target_pose_tokens,
                     is_last=is_last,
                 )
                 
                 ttt_metrics['layers'].append(layer_metrics)
             elif is_ttt:
-                input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
-                    batch,
-                    num_input_views=config.training.num_input_views,
-                    num_target_views=config.training.num_target_views,
-                    is_g3r=False,
-                    has_target_image=True,
-                    target_has_input=config.training.target_has_input,
-                )
+                raise NotImplementedError("TTT without G3R supervision is not supported yet")
             else:
                 input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
                     batch,
                     num_input_views=config.training.num_input_views,
                     num_target_views=config.training.num_target_views,
+                    num_ss_views=config.training.num_ss_views,
+                    num_ood_target_views=config.training.num_ood_target_views,
                     has_target_image=True,
-                    target_has_input=config.training.target_has_input,
+                    training=True,
                 )
 
         update_grads = (cur_train_step + 1) % grad_accum_steps == 0 or cur_train_step == total_train_steps
@@ -368,9 +369,9 @@ while cur_train_step <= total_train_steps:
 
             if is_ttt and config.model.ttt.supervise_mode == "g3r":
                 s = s.detach().requires_grad_(True)
-                full_encoded_latents = full_encoded_latents.detach() if full_encoded_latents is not None else None
-                input_pose_tokens = input_pose_tokens.detach()
+                ss_pose_tokens = ss_pose_tokens.detach()
                 target_pose_tokens = target_pose_tokens.detach()
+                ood_target_pose_tokens = ood_target_pose_tokens.detach()
 
     # for g3r, the lr scheduler will be updated after all the inner iterations are done
     lr_scheduler.step()
@@ -379,21 +380,31 @@ while cur_train_step <= total_train_steps:
 
     # log and save checkpoint
     if ddp_info.is_main_process:
-        target_loss_dict = {k: float(f"{v.item():.6f}") for k, v in target_loss_metrics.items()}
         input_loss_dict = {k: float(f"{v.item():.6f}") for k, v in input_loss_metrics.items()}
+        target_loss_dict = {k: float(f"{v.item():.6f}") for k, v in target_loss_metrics.items()}
+        ss_loss_dict = {k: float(f"{v.item():.6f}") for k, v in ss_loss_metrics.items()}
+        ood_target_loss_dict = {k: float(f"{v.item():.6f}") for k, v in ood_target_loss_metrics.items()}
+        
         # print in console
         if (cur_train_step % config.training.print_every == 0) or (cur_train_step < 100 + start_train_step):
             print_str = f"[Epoch {int(cur_epoch):>3d}] | Forwad step: {int(cur_train_step):>6d} (Param update step: {int(cur_param_update_step):>6d})"
             if is_ttt:
-                print_str += f" | ttt_iters: {ttt_metrics['n_iters']} | ttt_encoder_views: {ttt_metrics['n_encoder_views']} | ttt_ss_views: {ttt_metrics['n_ss_views']}"
+                print_str += f" | ttt_iters: {ttt_metrics['n_iters']}"
             print_str += f" | Iter Time: {time.time() - tic:.2f}s | LR: {optimizer.param_groups[0]['lr']:.6f}"
             # Add loss values
-            print_str += "\ntarget: "
-            for k, v in target_loss_dict.items():
-                print_str += f"{k}: {v:.6f} | "
             print_str += "\ninput: "
             for k, v in input_loss_dict.items():
                 print_str += f"{k}: {v:.6f} | "
+            print_str += "\ntarget: "
+            for k, v in target_loss_dict.items():
+                print_str += f"{k}: {v:.6f} | "
+            print_str += "\nss: "
+            for k, v in ss_loss_dict.items():
+                print_str += f"{k}: {v:.6f} | "
+            print_str += "\nood_target: "
+            for k, v in ood_target_loss_dict.items():
+                print_str += f"{k}: {v:.6f} | "
+            
             if is_ttt and config.model.ttt.distill_factor > 0.0:
                 print_str += f"\ndistillation: {ttt_metrics['last_distillation_loss']:.6f}"
             print(print_str)
@@ -411,8 +422,10 @@ while cur_train_step <= total_train_steps:
                 "grad_norm": total_grad_norm,
                 "epoch": cur_epoch,
             }
-            log_dict.update({"train/target/" + k: v for k, v in target_loss_dict.items()})
             log_dict.update({"train/input/" + k: v for k, v in input_loss_dict.items()})
+            log_dict.update({"train/target/" + k: v for k, v in target_loss_dict.items()})
+            log_dict.update({"train/ss/" + k: v for k, v in ss_loss_dict.items()})
+            log_dict.update({"train/ood_target/" + k: v for k, v in ood_target_loss_dict.items()})
             if is_ttt and config.model.ttt.distill_factor > 0.0:
                 log_dict["train/distillation"] = ttt_metrics["last_distillation_loss"]
             
@@ -420,8 +433,6 @@ while cur_train_step <= total_train_steps:
             if is_ttt:
                 assert ttt_metrics is not None, "TTT metrics are not found"
                 log_dict["ttt/n_iters"] = ttt_metrics["n_iters"]
-                log_dict["ttt/n_encoder_views"] = ttt_metrics["n_encoder_views"]
-                log_dict["ttt/n_ss_views"] = ttt_metrics["n_ss_views"]
                 # Log per-layer metrics
                 if 'layers' in ttt_metrics and len(ttt_metrics['layers']) > 0:
                     for i, layer_metrics in enumerate(ttt_metrics['layers']):
@@ -492,7 +503,7 @@ while cur_train_step <= total_train_steps:
         if export_inter_results:
             vis_path = os.path.join(config.training.checkpoint_dir, f"iter_{cur_train_step:08d}")
             os.makedirs(vis_path, exist_ok=True)
-            visualize_intermediate_results(vis_path, input, target, rendered_input, rendered_target)
+            visualize_intermediate_results(vis_path, input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target)
             model.train()
 
     # test on multiple nodes
@@ -521,28 +532,20 @@ while cur_train_step <= total_train_steps:
                             # bound the number of iterations by the warmup steps
                             real_n_iters = int(1 + (n_iters - 1) * min(1.0, cur_train_step / config.model.ttt.warmup_steps))
                         for i in range(len(enc_views)):
-                            n_encoder_views = enc_views[i]
-                            n_ss_views = ss_views[i]
                             if config.model.ttt.supervise_mode != "g3r":
-                                input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
-                                    batch,
-                                    num_input_views=config.training.num_input_views,
-                                    num_target_views=3,
-                                    is_g3r=False, # at inference time, whether using G3R supervision behaves the same.
-                                    n_encoder_views=n_encoder_views,
-                                    n_ss_views=n_ss_views,
-                                    n_iters=real_n_iters,
-                                    has_target_image=True,
-                                    target_has_input=False,
-                                )
+                                raise NotImplementedError("TTT without G3R supervision is not supported yet")
                             else:
                                 input = None
                                 target = None
+                                ss = None
+                                ood_target = None
                                 s = None
-                                full_encoded_latents = None
-                                input_pose_tokens = None
+                                ss_pose_tokens = None
                                 target_pose_tokens = None
-                                
+                                ood_target_pose_tokens = None
+                                ttt_metrics = {"layers": []}
+                                ttt_metrics["n_iters"] = real_n_iters
+
                                 for idx in range(real_n_iters):
                                     is_last = (idx == real_n_iters - 1)
                                     layer_idx = 0
@@ -550,37 +553,39 @@ while cur_train_step <= total_train_steps:
                                     t = idx / real_n_iters
 
                                     # in g3r, input loss metrics and target loss metrics are calculated on the updated state s.
-                                    input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, s, full_encoded_latents, input_pose_tokens, target_pose_tokens, layer_metrics = model(
+                                    input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss, s, ss_pose_tokens, target_pose_tokens, ood_target_pose_tokens, layer_metrics = model(
                                         batch,
                                         num_input_views=config.training.num_input_views,
                                         num_target_views=3,
+                                        num_ss_views=config.training.num_ss_views,
+                                        num_ood_target_views=config.training.num_ood_target_views,
                                         is_g3r=True,
-                                        n_encoder_views=n_encoder_views,
-                                        n_ss_views=n_ss_views,
                                         has_target_image=True,
-                                        target_has_input=False,
+                                        training=False,
                                         layer_idx=layer_idx,
                                         iter_idx=iter_idx,
                                         t=t,
                                         input=input,
                                         target=target,
+                                        ss=ss,
+                                        ood_target=ood_target,
                                         s=s,
-                                        full_encoded_latents=full_encoded_latents,
-                                        input_pose_tokens=input_pose_tokens,
+                                        ss_pose_tokens=ss_pose_tokens,
                                         target_pose_tokens=target_pose_tokens,
+                                        ood_target_pose_tokens=ood_target_pose_tokens,
                                         is_last=is_last,
                                     )
                             # export results with the iterations upper bound
-                            export_results(input, target, rendered_input, rendered_target, out_dir, compute_metrics=config.inference.get("compute_metrics"), n_encoder_views=n_encoder_views, n_ss_views=n_ss_views, n_iters=real_n_iters)
+                            export_results(input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target, out_dir, compute_metrics=config.inference.get("compute_metrics"), n_iters=real_n_iters)
                 else:
                     input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
                         batch,
                         num_input_views=config.training.num_input_views,
                         num_target_views=3,
                         has_target_image=True,
-                        target_has_input=False,
+                        training=False,
                     )
-                    export_results(input, target, rendered_input, rendered_target, out_dir, compute_metrics=config.inference.get("compute_metrics"))
+                    export_results(input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target, out_dir, compute_metrics=config.inference.get("compute_metrics"))
             dist.barrier()
             if ddp_info.is_main_process and config.inference.get("compute_metrics", False):
                 if is_ttt:
@@ -589,30 +594,37 @@ while cur_train_step <= total_train_steps:
                         if config.model.ttt.progressive:
                             # bound the number of iterations by the warmup steps
                             real_n_iters = int(1 + (n_iters - 1) * min(1.0, cur_train_step / config.model.ttt.warmup_steps))
-                        for i in range(len(enc_views)):
-                            n_encoder_views = enc_views[i]
-                            n_ss_views = ss_views[i]
-                            input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim = summarize_evaluation(out_dir, n_encoder_views=n_encoder_views, n_ss_views=n_ss_views, n_iters=real_n_iters)
-                            
-                            # log results in wandb
-                            test_name = f"test_{n_encoder_views}enc{n_ss_views}ss_{real_n_iters}iters"
-                            wandb.log({
-                                f"{test_name}/input_psnr": input_psnr,
-                                f"{test_name}/input_lpips": input_lpips,
-                                f"{test_name}/input_ssim": input_ssim,
-                                f"{test_name}/target_psnr": target_psnr,
-                                f"{test_name}/target_lpips": target_lpips,
-                                f"{test_name}/target_ssim": target_ssim,
-                            }, step=cur_train_step)
+                        input_psnr, input_lpips, input_ssim, \
+                            target_psnr, target_lpips, target_ssim, \
+                            ss_psnr, ss_lpips, ss_ssim, \
+                            ood_target_psnr, ood_target_lpips, ood_target_ssim = summarize_evaluation(out_dir, n_iters=real_n_iters)
+                        
+                        # log results in wandb
+                        test_name = f"test_{real_n_iters}iters"
+                        wandb.log({
+                            f"{test_name}/input_psnr": input_psnr,
+                            f"{test_name}/input_lpips": input_lpips,
+                            f"{test_name}/input_ssim": input_ssim,
+                            f"{test_name}/target_psnr": target_psnr,
+                            f"{test_name}/target_lpips": target_lpips,
+                            f"{test_name}/target_ssim": target_ssim,
+                            f"{test_name}/ss_psnr": ss_psnr,
+                            f"{test_name}/ss_lpips": ss_lpips,
+                            f"{test_name}/ss_ssim": ss_ssim,
+                            f"{test_name}/ood_target_psnr": ood_target_psnr,
+                            f"{test_name}/ood_target_lpips": ood_target_lpips,
+                            f"{test_name}/ood_target_ssim": ood_target_ssim,
+                        }, step=cur_train_step)
                 else:
-                    input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim = summarize_evaluation(out_dir)
+                    raise NotImplementedError("TTT without G3R supervision is not supported yet")
+                    # input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim, ss_psnr, ss_lpips, ss_ssim, ood_target_psnr, ood_target_lpips, ood_target_ssim = summarize_evaluation(out_dir)
     
     # delete all tensors
-    del batch, input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics
+    del batch, input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss, ttt_metrics
     if is_ttt and config.model.ttt.supervise_mode == "g3r":
-        del s, full_encoded_latents, input_pose_tokens, target_pose_tokens
+        del s, ss_pose_tokens, target_pose_tokens, ood_target_pose_tokens
     if ddp_info.is_main_process:
-        del target_loss_dict, input_loss_dict
+        del input_loss_dict, target_loss_dict, ss_loss_dict, ood_target_loss_dict
     torch.cuda.empty_cache()
     
     if export_inter_results:

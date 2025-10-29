@@ -118,12 +118,14 @@ def compute_ssim(
 def export_results(
     input,
     target,
+    ss,
+    ood_target,
     rendered_input,
     rendered_target,
+    rendered_ss,
+    rendered_ood_target,
     out_dir: str, 
     compute_metrics: bool = False,
-    n_encoder_views: int = None,
-    n_ss_views: int = None,
     n_iters: int = None,
 ):
     """
@@ -132,8 +134,15 @@ def export_results(
     Args:
         input: Input data batch
         target: Target data batch
+        ss: Self-supervision data batch
+        ood_target: OOD target data batch
+        rendered_input: Rendered input data batch
+        rendered_target: Rendered target data batch
+        rendered_ss: Rendered self-supervision data batch
+        rendered_ood_target: Rendered OOD target data batch
         out_dir: Directory to save the evaluation results
         compute_metrics: Whether to compute and save metrics
+        n_iters: Number of iterations
     """
     os.makedirs(out_dir, exist_ok=True)
     
@@ -146,23 +155,41 @@ def export_results(
         # Get target view indices
         input_indices = input.index[batch_idx, :, 0].cpu().numpy()
         target_indices = target.index[batch_idx, :, 0].cpu().numpy()
+        ss_indices = ss.index[batch_idx, :, 0].cpu().numpy()
+        ood_target_indices = ood_target.index[batch_idx, :, 0].cpu().numpy()
         
         # Save images
-        _save_images(input, target, rendered_input, rendered_target, batch_idx, sample_dir, n_encoder_views, n_ss_views, n_iters)
+        _save_images(
+            input, 
+            target, 
+            ss,
+            ood_target,
+            rendered_input, 
+            rendered_target, 
+            rendered_ss,
+            rendered_ood_target,
+            batch_idx, 
+            sample_dir, 
+            n_iters
+        )
         
         # Compute and save metrics if requested
         if compute_metrics:
             _save_metrics(
                 input.image[batch_idx],
                 target.image[batch_idx],
+                ss.image[batch_idx],
+                ood_target.image[batch_idx],
                 rendered_input[batch_idx],
                 rendered_target[batch_idx],
+                rendered_ss[batch_idx],
+                rendered_ood_target[batch_idx],
                 input_indices,
                 target_indices,
+                ss_indices,
+                ood_target_indices,
                 sample_dir,
                 scene_name,
-                n_encoder_views,
-                n_ss_views,
                 n_iters
             )
         
@@ -171,142 +198,123 @@ def export_results(
         #     _save_video(result.video_rendering[batch_idx], sample_dir)
 
 
-def visualize_intermediate_results(out_dir, input, target, rendered_input, rendered_target):
+def visualize_intermediate_results(out_dir, input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target):
     os.makedirs(out_dir, exist_ok=True)
 
-    if rendered_input is not None:
-        input_image = input.image
-        rendered_image = rendered_input
-        b, v, _, h, w = rendered_image.size()
-        rendered_image = rendered_image.reshape(b * v, -1, h, w)
-        input_image = input_image.reshape(b * v, -1, h, w)
-        visualized_image = torch.cat((input_image, rendered_image), dim=3).detach().cpu()
+    def vis(gt, rendered, name):
+        b, v, _, h, w = rendered.size()
+        rendered = rendered.reshape(b * v, -1, h, w)
+        gt = gt.reshape(b * v, -1, h, w)
+        visualized_image = torch.cat((gt, rendered), dim=3).detach().cpu()
         visualized_image = rearrange(visualized_image, "(b v) c h (m w) -> (b h) (v m w) c", v=v, m=2)
         visualized_image = (visualized_image.numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
-        
-        uids = [input.index[b, 0, -1].item() for b in range(input.index.size(0))]
-        uid_based_filename = f"{uids[0]:08}_{uids[-1]:08}"
-        Image.fromarray(visualized_image).save(
-            os.path.join(out_dir, f"rendered_input_{uid_based_filename}.jpg")
-        )
-        with open(os.path.join(out_dir, f"uids_input.txt"), "w") as f:
-            uids = "_".join([f"{uid:08}" for uid in uids])
-            f.write(uids)
+        Image.fromarray(visualized_image).save(os.path.join(out_dir, f"rendered_{name}.jpg"))
+        # with open(os.path.join(out_dir, f"uids_{name}.txt"), "w") as f:
+        #     uids = [gt.index[b, 0, -1].item() for b in range(gt.index.size(0))]
+        #     uids = "_".join([f"{uid:08}" for uid in uids])
+        #     f.write(uids)
 
-    if rendered_target is not None:
-        target_image = target.image
-        rendered_image = rendered_target
-        b, v, _, h, w = rendered_image.size()
-        rendered_image = rendered_image.reshape(b * v, -1, h, w)
-        target_image = target_image.reshape(b * v, -1, h, w)
-        visualized_image = torch.cat((target_image, rendered_image), dim=3).detach().cpu()
-        visualized_image = rearrange(visualized_image, "(b v) c h (m w) -> (b h) (v m w) c", v=v, m=2)
-        visualized_image = (visualized_image.numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
-        
-        uids = [target.index[b, 0, -1].item() for b in range(target.index.size(0))]
-
-        uid_based_filename = f"{uids[0]:08}_{uids[-1]:08}"
-        Image.fromarray(visualized_image).save(
-            os.path.join(out_dir, f"rendered_target_{uid_based_filename}.jpg")
-        )
-        with open(os.path.join(out_dir, f"uids_target.txt"), "w") as f:
-            uids = "_".join([f"{uid:08}" for uid in uids])
-            f.write(uids)
-
-    input_uids = [input.index[b, 0, -1].item() for b in range(input.index.size(0))]
-    input_uid_based_filename = f"{input_uids[0]:08}_{input_uids[-1]:08}"
-    
-    # Create a grid of input images
-    b, v, c, h, w = input.image.size()
-    input_images = input.image.reshape(b * v, c, h, w).detach().cpu()
-    input_grid = rearrange(input_images, "(b v) c h w -> (b h) (v w) c", v=v)
-    input_grid = (input_grid.numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
-    
-    # Save the input image grid
-    Image.fromarray(input_grid).save(
-        os.path.join(out_dir, f"input_{input_uid_based_filename}.jpg")
-    )
+    vis(input.image, rendered_input, "input")
+    vis(target.image, rendered_target, "target")
+    vis(ss.image, rendered_ss, "ss")
+    vis(ood_target.image, rendered_ood_target, "ood_target")
 
 
-def _save_images(input, target, rendered_input, rendered_target, batch_idx, out_dir, n_encoder_views=None, n_ss_views=None, n_iters=None):
+def _save_images(input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target, batch_idx, out_dir, n_iters=None):
     """Save visualization images."""
     # Save input image
     # input_img = input.image[batch_idx]
     # input_img = rearrange(input_img, "v c h w -> h (v w) c")
     # input_img = (input_img.cpu().numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
     # Image.fromarray(input_img).save(os.path.join(out_dir, "input.png"))
-    prefix = f"{n_encoder_views}enc{n_ss_views}ss_{n_iters}iters_" if (n_encoder_views is not None and n_ss_views is not None and n_iters is not None) else ""
+    prefix = f"{n_iters}iters_" if (n_iters is not None) else ""
     
     # Save GT input vs rendered input side-by-side
-    comparison = torch.cat(
-        (input.image[batch_idx], rendered_input[batch_idx]), 
-        dim=2
-    ).detach().cpu()
-    comparison = rearrange(comparison, "v c h w -> h (v w) c")
-    comparison = (comparison.numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
-    Image.fromarray(comparison).save(os.path.join(out_dir, f"{prefix}input.png"))
+    def save_comparison(gt, rendered, name):
+        comparison = torch.cat(
+            (gt, rendered), 
+            dim=2
+        ).detach().cpu()
+        comparison = rearrange(comparison, "v c h w -> h (v w) c")
+        comparison = (comparison.numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
+        Image.fromarray(comparison).save(os.path.join(out_dir, f"{prefix}{name}.png"))
+    
+    save_comparison(input.image[batch_idx], rendered_input[batch_idx], "input")
+    save_comparison(target.image[batch_idx], rendered_target[batch_idx], "target")
+    save_comparison(ss.image[batch_idx], rendered_ss[batch_idx], "ss")
+    save_comparison(ood_target.image[batch_idx], rendered_ood_target[batch_idx], "ood_target")
 
-    # Save GT target vs rendered target side-by-side
-    comparison = torch.cat(
-        (target.image[batch_idx], rendered_target[batch_idx]), 
-        dim=2
-    ).detach().cpu()
-    comparison = rearrange(comparison, "v c h w -> h (v w) c")
-    comparison = (comparison.numpy() * 255.0).clip(0.0, 255.0).astype(np.uint8)
-    Image.fromarray(comparison).save(os.path.join(out_dir, f"{prefix}target.png"))
-    
 
-def _save_metrics(input, target, rendered_input, rendered_target, input_indices, target_indices, out_dir, scene_name, n_encoder_views=None, n_ss_views=None, n_iters=None):
-    n_input_views = rendered_input.size(0)
-    n_target_views = rendered_target.size(0)
-    input = input.to(torch.float32)
-    target = target.to(torch.float32)
-    rendered_input = rendered_input.to(torch.float32)
-    rendered_target = rendered_target.to(torch.float32)
+def _save_metrics(input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target, input_indices, target_indices, ss_indices, ood_target_indices, out_dir, scene_name, n_iters=None):
     
-    # compute metrics for input
-    input_psnr_values = compute_psnr(input, rendered_input)
-    input_lpips_values = compute_lpips(input, rendered_input)
-    input_ssim_values = compute_ssim(input, rendered_input)
-    
-    # compute metrics for target
-    target_psnr_values = compute_psnr(target, rendered_target)
-    target_lpips_values = compute_lpips(target, rendered_target)
-    target_ssim_values = compute_ssim(target, rendered_target)
+    def compute_metrics(gt, rendered):
+        gt = gt.to(torch.float32)
+        rendered = rendered.to(torch.float32)
+        psnr = compute_psnr(gt, rendered)
+        lpips = compute_lpips(gt, rendered)
+        ssim = compute_ssim(gt, rendered)
+        return psnr, lpips, ssim
+
+    input_psnr, input_lpips, input_ssim = compute_metrics(input, rendered_input)
+    target_psnr, target_lpips, target_ssim = compute_metrics(target, rendered_target)
+    ss_psnr, ss_lpips, ss_ssim = compute_metrics(ss, rendered_ss)
+    ood_target_psnr, ood_target_lpips, ood_target_ssim = compute_metrics(ood_target, rendered_ood_target)
 
     metrics = {
         "summary": {
             "scene_name": scene_name,
-            "input_psnr": float(input_psnr_values.mean()),
-            "input_lpips": float(input_lpips_values.mean()),
-            "input_ssim": float(input_ssim_values.mean()),
-            "target_psnr": float(target_psnr_values.mean()),
-            "target_lpips": float(target_lpips_values.mean()),
-            "target_ssim": float(target_ssim_values.mean()),
-            "n_input_views": n_input_views,
-            "n_target_views": n_target_views
+            "input_psnr": float(input_psnr.mean()),
+            "input_lpips": float(input_lpips.mean()),
+            "input_ssim": float(input_ssim.mean()),
+            "target_psnr": float(target_psnr.mean()),
+            "target_lpips": float(target_lpips.mean()),
+            "target_ssim": float(target_ssim.mean()),
+            "ss_psnr": float(ss_psnr.mean()),
+            "ss_lpips": float(ss_lpips.mean()),
+            "ss_ssim": float(ss_ssim.mean()),
+            "ood_target_psnr": float(ood_target_psnr.mean()),
+            "ood_target_lpips": float(ood_target_lpips.mean()),
+            "ood_target_ssim": float(ood_target_ssim.mean()),
         },
         "input_view": [],
-        "target_view": []
+        "target_view": [],
+        "ss_view": [],
+        "ood_target_view": []
     }
     for i, view_idx in enumerate(input_indices):
         metrics["input_view"].append({
             "view": int(view_idx), 
-            "input_psnr": float(input_psnr_values[i]), 
-            "input_lpips": float(input_lpips_values[i]), 
-            "input_ssim": float(input_ssim_values[i])
+            "input_psnr": float(input_psnr[i]), 
+            "input_lpips": float(input_lpips[i]), 
+            "input_ssim": float(input_ssim[i])
         })
     
     for i, view_idx in enumerate(target_indices):
         metrics["target_view"].append({
             "view": int(view_idx), 
-            "target_psnr": float(target_psnr_values[i]), 
-            "target_lpips": float(target_lpips_values[i]), 
-            "target_ssim": float(target_ssim_values[i])
+            "target_psnr": float(target_psnr[i]), 
+            "target_lpips": float(target_lpips[i]), 
+            "target_ssim": float(target_ssim[i])
+        })
+    
+    for i, view_idx in enumerate(ss_indices):
+        metrics["ss_view"].append({
+            "view": int(view_idx), 
+            "ss_psnr": float(ss_psnr[i]), 
+            "ss_lpips": float(ss_lpips[i]), 
+            "ss_ssim": float(ss_ssim[i])
+        })
+    
+    for i, view_idx in enumerate(ood_target_indices):
+        metrics["ood_target_view"].append({
+            "view": int(view_idx), 
+            "ood_target_psnr": float(ood_target_psnr[i]), 
+            "ood_target_lpips": float(ood_target_lpips[i]), 
+            "ood_target_ssim": float(ood_target_ssim[i])
         })
     
     # Save metrics to a single JSON file
-    prefix = f"{n_encoder_views}enc{n_ss_views}ss_{n_iters}iters_" if (n_encoder_views is not None and n_ss_views is not None and n_iters is not None) else ""
+    prefix = f"{n_iters}iters_" if (n_iters is not None) else ""
     with open(os.path.join(out_dir, f"{prefix}metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2)
 
@@ -325,7 +333,7 @@ def _save_video(frames, out_dir):
     )
 
 
-def summarize_evaluation(evaluation_folder, n_encoder_views=None, n_ss_views=None, n_iters=None):
+def summarize_evaluation(evaluation_folder, n_iters=None):
     # Find and sort all valid subfolders
     subfolders = sorted(
         [
@@ -338,7 +346,7 @@ def summarize_evaluation(evaluation_folder, n_encoder_views=None, n_ss_views=Non
 
     metrics = {}
     valid_subfolders = []
-    prefix = f"{n_encoder_views}enc{n_ss_views}ss_{n_iters}iters_" if (n_encoder_views is not None and n_ss_views is not None and n_iters is not None) else ""
+    prefix = f"{n_iters}iters_" if (n_iters is not None) else ""
     for subfolder in subfolders:
         json_path = os.path.join(subfolder, f"{prefix}metrics.json")
         if not os.path.exists(json_path):
@@ -381,5 +389,5 @@ def summarize_evaluation(evaluation_folder, n_encoder_views=None, n_ss_views=Non
     print(f"Summary written to {csv_file}")
     print(f"{prefix}Average: {','.join(averages_str)}")
 
-    # input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim
-    return averages[0], averages[1], averages[2], averages[3], averages[4], averages[5]
+    # input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim, ss_psnr, ss_lpips, ss_ssim, ood_target_psnr, ood_target_lpips, ood_target_ssim
+    return averages[0], averages[1], averages[2], averages[3], averages[4], averages[5], averages[6], averages[7], averages[8], averages[9], averages[10], averages[11]

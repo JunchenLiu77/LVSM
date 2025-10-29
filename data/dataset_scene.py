@@ -13,7 +13,7 @@ import torch.nn.functional as F
 
 
 class Dataset(Dataset):
-    def __init__(self, config, dataset_path, num_input_views, num_target_views, inference=False):
+    def __init__(self, config, dataset_path, num_input_views, num_target_views, num_ss_views, num_ood_target_views, min_dist, max_dist, inference=False):
         super().__init__()
         self.config = config
 
@@ -29,12 +29,20 @@ class Dataset(Dataset):
 
         self.num_input_views = num_input_views
         self.num_target_views = num_target_views
+        self.num_ss_views = num_ss_views
+        self.num_ood_target_views = num_ood_target_views
+        self.min_dist = min_dist
+        self.max_dist = max_dist
+
         self.inference = inference
         # Load file that specifies the input and target view indices to use for inference
         if self.inference:
             view_idx_list = dict()
-            assert self.config.inference["view_idx_file_path"] is not None and os.path.exists(self.config.inference["view_idx_file_path"]), "view_idx_file_path must be provided for inference"
-            with open(self.config.inference["view_idx_file_path"], 'r') as f:
+            # assert self.config.inference["view_idx_file_path"] is not None and os.path.exists(self.config.inference["view_idx_file_path"]), "view_idx_file_path must be provided for inference"
+            # with open(self.config.inference["view_idx_file_path"], 'r') as f:
+            view_idx_fp = f"data/evaluation_index_re10k_{num_ss_views}ss_{num_ood_target_views}ood_target_dist{min_dist}to{max_dist}.json"
+            assert os.path.exists(view_idx_fp), f"View index file {view_idx_fp} does not exist, please run scripts/gen_index.py to generate it first."
+            with open(view_idx_fp, 'r') as f:
                 view_idx_list = json.load(f)
                 # filter out None values, i.e. scenes that don't have specified input and targetviews
                 view_idx_list_filtered = [k for k, v in view_idx_list.items() if v is not None]
@@ -50,14 +58,20 @@ class Dataset(Dataset):
             # prevent memory leaking by converting dict to numpy array
             # https://github.com/pytorch/pytorch/issues/13246#issuecomment-905703662
             # https://github.com/pytorch/pytorch/issues/13246#issuecomment-715050814
-            view_idx_list_np = []
+            input_idx_list_np, target_idx_list_np, ss_idx_list_np, ood_target_idx_list_np = [], [], [], []
             for scene_path in all_scene_paths:
                 data_json = json.load(open(scene_path, 'r'))
                 scene_name = data_json["scene_name"]
                 assert scene_name in view_idx_list, f"Scene {scene_name} is not in the view idx list."
-                view_idx_list_np.append(view_idx_list[scene_name]["context"] + view_idx_list[scene_name]["target"])
-            self.view_idx_list_np = np.array(view_idx_list_np).astype(np.int32)
-            print(f"Found {len(view_idx_list_filtered)} scenes in index file, {len(all_scene_paths)} scenes exist in the dataset.")
+                input_idx_list_np.append(view_idx_list[scene_name]["input"])
+                target_idx_list_np.append(view_idx_list[scene_name]["target"])
+                ss_idx_list_np.append(view_idx_list[scene_name]["ss"])
+                ood_target_idx_list_np.append(view_idx_list[scene_name]["ood_target"])
+            self.input_idx_list_np = np.array(input_idx_list_np).astype(np.int32)
+            self.target_idx_list_np = np.array(target_idx_list_np).astype(np.int32)
+            self.ss_idx_list_np = np.array(ss_idx_list_np).astype(np.int32)
+            self.ood_target_idx_list_np = np.array(ood_target_idx_list_np).astype(np.int32)
+            print(f"Found {len(input_idx_list_np)} scenes in index file, {len(all_scene_paths)} scenes exist in the dataset.")
         
         # prevent memory leaking by converting string list to numpy array
         self.all_scene_paths = np.array(all_scene_paths).astype(np.bytes_)
@@ -147,24 +161,54 @@ class Dataset(Dataset):
         return in_c2ws
 
     def view_selector(self, frames):
-        if len(frames) < self.num_input_views + self.num_target_views:
+        if len(frames) < self.num_input_views + self.num_target_views + self.num_ss_views + self.num_ood_target_views:
             return None
+        
         # sample view candidates
         view_selector_config = self.config.training.view_selector
         min_frame_dist = view_selector_config.get("min_frame_dist", 25)
         max_frame_dist = min(len(frames) - 1, view_selector_config.get("max_frame_dist", 100))
         if max_frame_dist <= min_frame_dist:
             return None
+        
+        # distance between input views
         frame_dist = random.randint(min_frame_dist, max_frame_dist)
         if len(frames) <= frame_dist:
             return None
         start_frame = random.randint(0, len(frames) - frame_dist - 1)
         end_frame = start_frame + frame_dist
-        sampled_frames = random.sample(range(start_frame + 1, end_frame), self.num_input_views + self.num_target_views - 2)
+        # sampled_frames = random.sample(range(start_frame + 1, end_frame), self.num_input_views + self.num_target_views - 2)
+        # input views and target views are sampled in the same way as the original lvsm codebase
+        input_indices = [start_frame, end_frame]
+        target_indices = random.sample(range(start_frame + 1, end_frame), self.num_target_views)
+
+        # distances between ss views and input views
+        dist_left = random.randint(self.min_dist, self.max_dist) 
+        dist_right = random.randint(self.min_dist, self.max_dist)
+        ss_left = max(start_frame - dist_left, 0)
+        ss_right = min(end_frame + dist_right, len(frames) - 1)
         
-        # JC: always use two input views, which are the first two in returned list.
-        image_indices = [start_frame, end_frame] + sampled_frames
+        assert self.num_ss_views == 2, "logic below are for num_ss_views == 2"
+        ss_indices = [ss_left, ss_right]
+        
+        # sample ood target views on both sides
+        num_ood_target_views_left = self.num_ood_target_views // 2
+        num_ood_target_views_right = self.num_ood_target_views - num_ood_target_views_left
+        ood_target_left_range = range(ss_left, start_frame + 1)
+        ood_target_right_range = range(end_frame, ss_right + 1)
+        if start_frame - ss_left + 1 >= num_ood_target_views_left:
+            ood_target_left = random.sample(ood_target_left_range, num_ood_target_views_left)
+        else:
+            ood_target_left = ood_target_left_range * (num_ood_target_views_left // len(ood_target_left_range)) + random.sample(ood_target_left_range, num_ood_target_views_left % len(ood_target_left_range))
+        if ss_right - end_frame + 1 >= num_ood_target_views_right:
+            ood_target_right = random.sample(ood_target_right_range, num_ood_target_views_right)
+        else:
+            ood_target_right = ood_target_right_range * (num_ood_target_views_right // len(ood_target_right_range)) + random.sample(ood_target_right_range, num_ood_target_views_right % len(ood_target_right_range))
+        ood_target_indices = sorted(ood_target_left + ood_target_right)
+
+        image_indices = input_indices + target_indices + ss_indices + ood_target_indices
         return image_indices
+
 
     def __getitem__(self, idx):
         # try:
@@ -174,25 +218,15 @@ class Dataset(Dataset):
         scene_name = data_json["scene_name"]
 
         if self.inference:
-            current_view_idx = self.view_idx_list_np[idx] # concatenate context and target views
-            context_indices = list(current_view_idx[:len(current_view_idx) - self.num_target_views])
-            target_indices = list(current_view_idx[-self.num_target_views:])
-            assert self.num_input_views >= len(context_indices), f"We have {len(context_indices)} context views, but we want to select {self.num_input_views} input views."
-            assert self.num_target_views == len(target_indices), f"For now we expect the number of target views to be the same as the number of target views in the index file."
-            
-            if self.num_input_views > len(context_indices):
-                # randomly sample extra input views in between context views
-                n_extra_input_views = self.num_input_views - len(context_indices)
-                candidates = list(range(len(frames)))
-                candidates = [i for i in candidates if i not in context_indices and i not in target_indices and i > context_indices[0] and i < context_indices[-1]]
-                if len(candidates) < n_extra_input_views:
-                    # select all candidates and then randomly sample
-                    selected = candidates * (n_extra_input_views // len(candidates)) + random.sample(candidates, n_extra_input_views % len(candidates))
-                else:
-                    selected = random.sample(candidates, n_extra_input_views)
-                context_indices = context_indices + sorted(selected)
-            
-            image_indices= context_indices + target_indices
+            input_indices = list(self.input_idx_list_np[idx])
+            target_indices = list(self.target_idx_list_np[idx])
+            ss_indices = list(self.ss_idx_list_np[idx])
+            ood_target_indices = list(self.ood_target_idx_list_np[idx])
+            assert self.num_input_views == len(input_indices), f"We have {len(input_indices)} input views, but we want to select {self.num_input_views} input views."
+            assert self.num_target_views == len(target_indices), f"We have {len(target_indices)} target views, but we want to select {self.num_target_views} target views."
+            assert self.num_ss_views == len(ss_indices), f"We have {len(ss_indices)} ss views, but we want to select {self.num_ss_views} ss views."
+            assert self.num_ood_target_views == len(ood_target_indices), f"We have {len(ood_target_indices)} ood target views, but we want to select {self.num_ood_target_views} ood target views."
+            image_indices = input_indices + target_indices + ss_indices + ood_target_indices
         else:
             # sample input and target views
             image_indices = self.view_selector(frames)
@@ -200,7 +234,7 @@ class Dataset(Dataset):
                 return self.__getitem__(random.randint(0, len(self) - 1))
         image_paths_chosen = [frames[ic]["image_path"] for ic in image_indices]
         frames_chosen = [frames[ic] for ic in image_indices]
-        input_images, input_intrinsics, input_c2ws = self.preprocess_frames(frames_chosen, image_paths_chosen)
+        images, intrinsics, c2ws = self.preprocess_frames(frames_chosen, image_paths_chosen)
     
         # except:
         #     traceback.print_exc()
@@ -212,16 +246,16 @@ class Dataset(Dataset):
 
         # centerize and scale the poses (for unbounded scenes)
         scene_scale_factor = self.config.training.get("scene_scale_factor", 1.35)
-        input_c2ws = self.preprocess_poses(input_c2ws, scene_scale_factor)
+        c2ws = self.preprocess_poses(c2ws, scene_scale_factor)
 
         image_indices = torch.tensor(image_indices).long().unsqueeze(-1)  # [v, 1]
         scene_indices = torch.full_like(image_indices, idx)  # [v, 1]
         indices = torch.cat([image_indices, scene_indices], dim=-1)  # [v, 2]
 
         return {
-            "image": input_images,
-            "c2w": input_c2ws,
-            "fxfycxcy": input_intrinsics,
+            "image": images,
+            "c2w": c2ws,
+            "fxfycxcy": intrinsics,
             "index": indices,
             "scene_name": scene_name
         }

@@ -40,6 +40,7 @@ dataset = Dataset(
     dataset_path="/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/test/full_list.txt", 
     num_input_views=config.training.num_input_views, 
     num_target_views=config.training.num_target_views, 
+    num_ss_views=config.training.num_ss_views,
     inference=True
 )
 
@@ -135,7 +136,7 @@ with torch.no_grad(), torch.autocast(
                             n_ss_views=n_ss_views,
                             n_iters=real_n_iters,
                             has_target_image=True,
-                            target_has_input=False,
+                            training=False,
                         )
                     else:
                         input = None
@@ -160,7 +161,7 @@ with torch.no_grad(), torch.autocast(
                                 n_encoder_views=n_encoder_views,
                                 n_ss_views=n_ss_views,
                                 has_target_image=True,
-                                target_has_input=False,
+                                training=False,
                                 layer_idx=layer_idx,
                                 iter_idx=iter_idx,
                                 t=t,
@@ -180,7 +181,7 @@ with torch.no_grad(), torch.autocast(
                 num_input_views=config.training.num_input_views,
                 num_target_views=3,
                 has_target_image=True,
-                target_has_input=False,
+                training=False,
             )
             export_results(input, target, rendered_input, rendered_target, out_dir, compute_metrics=config.inference.get("compute_metrics"))
     dist.barrier()
