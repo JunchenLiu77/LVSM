@@ -4,7 +4,7 @@ import random
 import traceback
 import os
 import numpy as np
-import PIL
+from PIL import Image
 import torch
 from torch.utils.data import Dataset
 import json
@@ -13,33 +13,26 @@ import torch.nn.functional as F
 
 
 class Dataset(Dataset):
-    def __init__(self, config, dataset_path, num_input_views, num_target_views, num_ss_views, num_ood_target_views, min_dist, max_dist, inference=False):
+    def __init__(self, image_size, dataset_path, num_input_views, num_target_views, num_ss_views, num_ood_target_views, min_dist, max_dist, inference=False):
         super().__init__()
-        self.config = config
 
-        try:
-            with open(dataset_path, 'r') as f:
-                all_scene_paths = f.read().splitlines()
-            all_scene_paths = [path for path in all_scene_paths if path.strip()]
-        
-        except Exception as e:
-            print(f"Error reading dataset paths from '{dataset_path}'")
-            raise e
-        
-
+        self.dataset_path = dataset_path
+        self.image_size = image_size
         self.num_input_views = num_input_views
         self.num_target_views = num_target_views
         self.num_ss_views = num_ss_views
         self.num_ood_target_views = num_ood_target_views
         self.min_dist = min_dist
         self.max_dist = max_dist
-
         self.inference = inference
+
+        # list all scenes in the dataset
+        scenes = os.listdir(dataset_path)
+        all_scene_paths = [os.path.join(dataset_path, scene) for scene in scenes]
+
         # Load file that specifies the input and target view indices to use for inference
         if self.inference:
             view_idx_list = dict()
-            # assert self.config.inference["view_idx_file_path"] is not None and os.path.exists(self.config.inference["view_idx_file_path"]), "view_idx_file_path must be provided for inference"
-            # with open(self.config.inference["view_idx_file_path"], 'r') as f:
             view_idx_fp = f"data/evaluation_index_re10k_{num_ss_views}ss_{num_ood_target_views}ood_target_dist{min_dist}to{max_dist}.json"
             assert os.path.exists(view_idx_fp), f"View index file {view_idx_fp} does not exist, please run scripts/gen_index.py to generate it first."
             with open(view_idx_fp, 'r') as f:
@@ -48,8 +41,7 @@ class Dataset(Dataset):
                 view_idx_list_filtered = [k for k, v in view_idx_list.items() if v is not None]
                 filtered_scene_paths = []
                 for scene in all_scene_paths:
-                    file_name = scene.split("/")[-1]
-                    scene_name = file_name.split(".")[0]
+                    scene_name = scene.split("/")[-1]
                     if scene_name in view_idx_list_filtered:
                         filtered_scene_paths.append(scene)
 
@@ -60,7 +52,8 @@ class Dataset(Dataset):
             # https://github.com/pytorch/pytorch/issues/13246#issuecomment-715050814
             input_idx_list_np, target_idx_list_np, ss_idx_list_np, ood_target_idx_list_np = [], [], [], []
             for scene_path in all_scene_paths:
-                data_json = json.load(open(scene_path, 'r'))
+                json_file_path = os.path.join(scene_path, "scene_info.json")
+                data_json = json.load(open(json_file_path, 'r'))
                 scene_name = data_json["scene_name"]
                 assert scene_name in view_idx_list, f"Scene {scene_name} is not in the view idx list."
                 input_idx_list_np.append(view_idx_list[scene_name]["input"])
@@ -73,6 +66,7 @@ class Dataset(Dataset):
             self.ood_target_idx_list_np = np.array(ood_target_idx_list_np).astype(np.int32)
             print(f"Found {len(input_idx_list_np)} scenes in index file, {len(all_scene_paths)} scenes exist in the dataset.")
         
+        print(f"Using {len(all_scene_paths)} scenes")
         # prevent memory leaking by converting string list to numpy array
         self.all_scene_paths = np.array(all_scene_paths).astype(np.bytes_)
 
@@ -80,49 +74,6 @@ class Dataset(Dataset):
     def __len__(self):
         return len(self.all_scene_paths)
 
-
-    def preprocess_frames(self, frames_chosen, image_paths_chosen):
-        resize_h = self.config.model.image_tokenizer.image_size
-        patch_size = self.config.model.image_tokenizer.patch_size
-        square_crop = self.config.training.get("square_crop", False)
-
-        images = []
-        intrinsics = []
-        for cur_frame, cur_image_path in zip(frames_chosen, image_paths_chosen):
-            image = PIL.Image.open(cur_image_path)
-            original_image_w, original_image_h = image.size
-            
-            resize_w = int(resize_h / original_image_h * original_image_w)
-            resize_w = int(round(resize_w / patch_size) * patch_size)
-            # if torch.distributed.get_rank() == 0:
-            #     import ipdb; ipdb.set_trace()
-
-            image = image.resize((resize_w, resize_h), resample=PIL.Image.LANCZOS)
-            if square_crop:
-                min_size = min(resize_h, resize_w)
-                start_h = (resize_h - min_size) // 2
-                start_w = (resize_w - min_size) // 2
-                image = image.crop((start_w, start_h, start_w + min_size, start_h + min_size))
-
-            image = np.array(image) / 255.0
-            image = torch.from_numpy(image).permute(2, 0, 1).float()
-            fxfycxcy = np.array(cur_frame["fxfycxcy"])
-            resize_ratio_x = resize_w / original_image_w
-            resize_ratio_y = resize_h / original_image_h
-            fxfycxcy *= (resize_ratio_x, resize_ratio_y, resize_ratio_x, resize_ratio_y)
-            if square_crop:
-                fxfycxcy[2] -= start_w
-                fxfycxcy[3] -= start_h
-            fxfycxcy = torch.from_numpy(fxfycxcy).float()
-            images.append(image)
-            intrinsics.append(fxfycxcy)
-
-        images = torch.stack(images, dim=0)
-        intrinsics = torch.stack(intrinsics, dim=0)
-        w2cs = np.stack([np.array(frame["w2c"]) for frame in frames_chosen])
-        c2ws = np.linalg.inv(w2cs) # (num_frames, 4, 4)
-        c2ws = torch.from_numpy(c2ws).float()
-        return images, intrinsics, c2ws
 
     def preprocess_poses(
         self,
@@ -160,14 +111,14 @@ class Dataset(Dataset):
 
         return in_c2ws
 
+
     def view_selector(self, frames):
         if len(frames) < self.num_input_views + self.num_target_views + self.num_ss_views + self.num_ood_target_views:
             return None
         
-        # sample view candidates
-        view_selector_config = self.config.training.view_selector
-        min_frame_dist = view_selector_config.get("min_frame_dist", 25)
-        max_frame_dist = min(len(frames) - 1, view_selector_config.get("max_frame_dist", 100))
+        # TODO: remove this hardcode
+        min_frame_dist = 25 
+        max_frame_dist = 192
         if max_frame_dist <= min_frame_dist:
             return None
         
@@ -213,7 +164,8 @@ class Dataset(Dataset):
     def __getitem__(self, idx):
         # try:
         scene_path = str(self.all_scene_paths[idx], encoding="utf-8").strip()
-        data_json = json.load(open(scene_path, 'r'))
+        json_file_path = os.path.join(scene_path, "scene_info.json")
+        data_json = json.load(open(json_file_path, 'r'))
         frames = data_json["frames"]
         scene_name = data_json["scene_name"]
 
@@ -232,21 +184,23 @@ class Dataset(Dataset):
             image_indices = self.view_selector(frames)
             if image_indices is None:
                 return self.__getitem__(random.randint(0, len(self) - 1))
-        image_paths_chosen = [frames[ic]["image_path"] for ic in image_indices]
         frames_chosen = [frames[ic] for ic in image_indices]
-        images, intrinsics, c2ws = self.preprocess_frames(frames_chosen, image_paths_chosen)
-    
-        # except:
-        #     traceback.print_exc()
-        #     print(f"error loading")
-        #     print(image_indices)
-        #     print(image_paths_chosen)
-        #     return self.__getitem__(random.randint(0, len(self) - 1))
+        image_paths = [frame["image_path"] for frame in frames_chosen]
+        c2ws = torch.tensor([frame["c2ws"] for frame in frames_chosen]).float()
+        intrinsics = torch.tensor([frame["intrinsics"] for frame in frames_chosen]).float()
 
+        # per-batch normalization
+        c2ws = self.preprocess_poses(c2ws, scene_scale_factor=1.35)
 
-        # centerize and scale the poses (for unbounded scenes)
-        scene_scale_factor = self.config.training.get("scene_scale_factor", 1.35)
-        c2ws = self.preprocess_poses(c2ws, scene_scale_factor)
+        images = []
+        for image_path in image_paths:
+            abs_image_path = os.path.join(self.dataset_path, image_path)
+            image = Image.open(abs_image_path)
+            assert image.size == (self.image_size, self.image_size), f"Image {image_path} is not {self.image_size}x{self.image_size}"
+            image = np.array(image) / 255.0
+            image = torch.from_numpy(image).permute(2, 0, 1).float()
+            images.append(image)
+        images = torch.stack(images, dim=0)
 
         image_indices = torch.tensor(image_indices).long().unsqueeze(-1)  # [v, 1]
         scene_indices = torch.full_like(image_indices, idx)  # [v, 1]
@@ -260,3 +214,23 @@ class Dataset(Dataset):
             "scene_name": scene_name
         }
 
+
+if __name__ == "__main__":
+    # dry run the dataset
+    dataset = Dataset(
+        image_size=256,
+        dataset_path="/home/junchen/projects/aip-fsanja/junchen/LVSM/re10k_preprocessed/test",
+        num_input_views=2,
+        num_target_views=2,
+        num_ss_views=2,
+        num_ood_target_views=2,
+        min_dist=25,
+        max_dist=100,
+        inference=False
+    )
+    batch = dataset[0]
+    print(batch["image"].shape)
+    print(batch["c2w"].shape)
+    print(batch["fxfycxcy"].shape)
+    print(batch["index"].shape)
+    print(batch["scene_name"])

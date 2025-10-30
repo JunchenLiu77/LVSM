@@ -51,39 +51,6 @@ def preprocess_frames(frames_chosen, image_paths_chosen, image_size=256, patch_s
     return images, intrinsics, c2ws
 
 
-def preprocess_poses(in_c2ws, scene_scale_factor=1.35):
-    """
-    Preprocess the poses to:
-    1. translate and rotate the scene to align the average camera direction and position
-    2. rescale the whole scene to a fixed scale
-    """
-
-    # Translation and Rotation
-    # align coordinate system (OpenCV coordinate) to the mean camera
-    # center is the average of all camera centers
-    # average direction vectors are computed from all camera direction vectors (average down and forward)
-    center = in_c2ws[:, :3, 3].mean(0)
-    avg_forward = F.normalize(in_c2ws[:, :3, 2].mean(0), dim=-1) # average forward direction (z of opencv camera)
-    avg_down = in_c2ws[:, :3, 1].mean(0) # average down direction (y of opencv camera)
-    avg_right = F.normalize(torch.cross(avg_down, avg_forward, dim=-1), dim=-1) # (x of opencv camera)
-    avg_down = F.normalize(torch.cross(avg_forward, avg_right, dim=-1), dim=-1) # (y of opencv camera)
-
-    avg_pose = torch.eye(4, device=in_c2ws.device) # average c2w matrix
-    avg_pose[:3, :3] = torch.stack([avg_right, avg_down, avg_forward], dim=-1)
-    avg_pose[:3, 3] = center 
-    avg_pose = torch.linalg.inv(avg_pose) # average w2c matrix
-    in_c2ws = avg_pose @ in_c2ws 
-
-
-    # Rescale the whole scene to a fixed scale
-    scene_scale = torch.max(torch.abs(in_c2ws[:, :3, 3]))
-    scene_scale = scene_scale_factor * scene_scale
-
-    in_c2ws[:, :3, 3] /= scene_scale
-
-    return in_c2ws
-
-
 def worker_init():
     """
     Initialize worker process by limiting threads to prevent resource exhaustion.
@@ -111,7 +78,8 @@ def preprocess_single_scene(args):
     os.makedirs(scene_dir, exist_ok=True)
 
     input_images, input_intrinsics, input_c2ws = preprocess_frames(frames, image_paths, image_size, patch_size, square_crop)
-    input_c2ws = preprocess_poses(input_c2ws, scene_scale_factor)
+    # lvsm use per-batch normalzation so we dont do pose normalization here.
+    # input_c2ws = preprocess_poses(input_c2ws, scene_scale_factor)
 
     # all the information needed for the scene: image, c2w, fxfycxcy, scene_name
     # scene_name: str

@@ -63,8 +63,8 @@ Dataset = importlib.import_module(module).__dict__[class_name]
 
 # training set
 train_set = Dataset(
-    config, 
-    dataset_path="/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/train/full_list.txt", 
+    image_size=config.model.image_tokenizer.image_size,
+    dataset_path="re10k_preprocessed/train",
     num_input_views=config.training.num_input_views, 
     num_target_views=config.training.num_target_views, 
     num_ss_views=config.training.num_ss_views,
@@ -88,8 +88,8 @@ train_loader_iter = iter(train_loader)
 if config.training.test_every > 0:
     # test set, use sampler to keep align with LVSM official testset sampling
     test_set = Dataset(
-        config, 
-        dataset_path="/home/junchen/projects/aip-fsanja/shared/datasets/re10k_new/test/full_list.txt", 
+        image_size=config.model.image_tokenizer.image_size,
+        dataset_path="re10k_preprocessed/test",
         num_input_views=2,
         num_target_views=3,
         num_ss_views=config.training.num_ss_views,
@@ -113,15 +113,8 @@ if config.training.test_every > 0:
     test_sampler.set_epoch(0)
 
     if is_ttt:
-        enc_views, ss_views = [], []
         iters = config.training.test_layers
-        if config.training.test_1enc1ss:
-            enc_views.append(1)
-            ss_views.append(1)
-        if config.training.test_2enc2ss:
-            enc_views.append(2)
-            ss_views.append(2)
-        assert len(enc_views) > 0 and len(ss_views) > 0 and len(iters) > 0, "At least one test setting should be specified"
+        assert len(iters) > 0, "At least one test setting should be specified"
 
 
 total_train_steps = config.training.train_steps
@@ -531,50 +524,49 @@ while cur_train_step <= total_train_steps:
                         if config.model.ttt.progressive:
                             # bound the number of iterations by the warmup steps
                             real_n_iters = int(1 + (n_iters - 1) * min(1.0, cur_train_step / config.model.ttt.warmup_steps))
-                        for i in range(len(enc_views)):
-                            if config.model.ttt.supervise_mode != "g3r":
-                                raise NotImplementedError("TTT without G3R supervision is not supported yet")
-                            else:
-                                input = None
-                                target = None
-                                ss = None
-                                ood_target = None
-                                s = None
-                                ss_pose_tokens = None
-                                target_pose_tokens = None
-                                ood_target_pose_tokens = None
-                                ttt_metrics = {"layers": []}
-                                ttt_metrics["n_iters"] = real_n_iters
+                        if config.model.ttt.supervise_mode != "g3r":
+                            raise NotImplementedError("TTT without G3R supervision is not supported yet")
+                        else:
+                            input = None
+                            target = None
+                            ss = None
+                            ood_target = None
+                            s = None
+                            ss_pose_tokens = None
+                            target_pose_tokens = None
+                            ood_target_pose_tokens = None
+                            ttt_metrics = {"layers": []}
+                            ttt_metrics["n_iters"] = real_n_iters
 
-                                for idx in range(real_n_iters):
-                                    is_last = (idx == real_n_iters - 1)
-                                    layer_idx = 0
-                                    iter_idx = idx % config.model.ttt.n_iters_per_layer
-                                    t = idx / real_n_iters
+                            for idx in range(real_n_iters):
+                                is_last = (idx == real_n_iters - 1)
+                                layer_idx = 0
+                                iter_idx = idx % config.model.ttt.n_iters_per_layer
+                                t = idx / real_n_iters
 
-                                    # in g3r, input loss metrics and target loss metrics are calculated on the updated state s.
-                                    input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss, s, ss_pose_tokens, target_pose_tokens, ood_target_pose_tokens, layer_metrics = model(
-                                        batch,
-                                        num_input_views=config.training.num_input_views,
-                                        num_target_views=3,
-                                        num_ss_views=config.training.num_ss_views,
-                                        num_ood_target_views=config.training.num_ood_target_views,
-                                        is_g3r=True,
-                                        has_target_image=True,
-                                        training=False,
-                                        layer_idx=layer_idx,
-                                        iter_idx=iter_idx,
-                                        t=t,
-                                        input=input,
-                                        target=target,
-                                        ss=ss,
-                                        ood_target=ood_target,
-                                        s=s,
-                                        ss_pose_tokens=ss_pose_tokens,
-                                        target_pose_tokens=target_pose_tokens,
-                                        ood_target_pose_tokens=ood_target_pose_tokens,
-                                        is_last=is_last,
-                                    )
+                                # in g3r, input loss metrics and target loss metrics are calculated on the updated state s.
+                                input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss, s, ss_pose_tokens, target_pose_tokens, ood_target_pose_tokens, layer_metrics = model(
+                                    batch,
+                                    num_input_views=config.training.num_input_views,
+                                    num_target_views=3,
+                                    num_ss_views=config.training.num_ss_views,
+                                    num_ood_target_views=config.training.num_ood_target_views,
+                                    is_g3r=True,
+                                    has_target_image=True,
+                                    training=False,
+                                    layer_idx=layer_idx,
+                                    iter_idx=iter_idx,
+                                    t=t,
+                                    input=input,
+                                    target=target,
+                                    ss=ss,
+                                    ood_target=ood_target,
+                                    s=s,
+                                    ss_pose_tokens=ss_pose_tokens,
+                                    target_pose_tokens=target_pose_tokens,
+                                    ood_target_pose_tokens=ood_target_pose_tokens,
+                                    is_last=is_last,
+                                )
                             # export results with the iterations upper bound
                             export_results(input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target, out_dir, compute_metrics=config.inference.get("compute_metrics"), n_iters=real_n_iters)
                 else:
