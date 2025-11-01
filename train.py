@@ -210,11 +210,118 @@ model.train()
 while cur_train_step <= total_train_steps:
     tic = time.time()
     cur_epoch = int(cur_train_step * (total_batch_size / grad_accum_steps) // len(train_set))
+
+    # test on multiple nodes - run before optimizer update to test at initial state
+    if config.training.test_every > 0 and (cur_train_step == 0 or cur_train_step % config.training.test_every == 0):
+        export_inter_results = True
+        print_rank0(f"Running inference at step {cur_train_step} (before optimizer update)")
+        out_dir = os.path.join(config.training.checkpoint_dir, f"iter_{cur_train_step:08d}_inference")
+        os.makedirs(out_dir, exist_ok=True)
+        
+        # instantiate a new iterator every time we test
+        test_loader_iter = iter(test_loader)
+        with torch.no_grad(), torch.autocast(
+            enabled=config.training.use_amp,
+            device_type="cuda",
+            dtype=amp_dtype_mapping[config.training.amp_dtype],
+        ):
+            for (batch_idx, batch) in enumerate(test_loader_iter):
+                print(f"[Rank {ddp_info.local_rank}] Running inference on the {batch_idx}th batch")
+                if config.inference.get("first_n_batches", None) is not None and batch_idx >= config.inference.get("first_n_batches", None):
+                    break
+                batch = {k: v.to(ddp_info.device) if type(v) == torch.Tensor else v for k, v in batch.items()}
+                if is_ttt:
+                    for n_iters in iters:
+                        real_n_iters = n_iters
+                        if config.model.ttt.progressive:
+                            real_n_iters = int(1 + (n_iters - 1) * min(1.0, max(0, (cur_train_step - config.model.ttt.warmup_steps) / config.model.ttt.warmup_steps)))
+                        if config.model.ttt.supervise_mode != "g3r":
+                            raise NotImplementedError("TTT without G3R supervision is not supported yet")
+                        else:
+                            input = None
+                            target = None
+                            ss = None
+                            ood_target = None
+                            s = None
+                            ss_pose_tokens = None
+                            target_pose_tokens = None
+                            ood_target_pose_tokens = None
+                            ttt_metrics = {"layers": []}
+                            ttt_metrics["n_iters"] = real_n_iters
+
+                            for idx in range(real_n_iters):
+                                is_last = (idx == real_n_iters - 1)
+                                layer_idx = 0
+                                iter_idx = idx % config.model.ttt.n_iters_per_layer
+                                t = idx / real_n_iters
+
+                                # in g3r, input loss metrics and target loss metrics are calculated on the updated state s.
+                                input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss, s, ss_pose_tokens, target_pose_tokens, ood_target_pose_tokens, layer_metrics = model(
+                                    batch,
+                                    num_input_views=config.training.num_input_views,
+                                    num_target_views=3,
+                                    num_ss_views=config.training.num_ss_views,
+                                    num_ood_target_views=config.training.num_ood_target_views,
+                                    is_g3r=True,
+                                    has_target_image=True,
+                                    training=False,
+                                    layer_idx=layer_idx,
+                                    iter_idx=iter_idx,
+                                    t=t,
+                                    input=input,
+                                    target=target,
+                                    ss=ss,
+                                    ood_target=ood_target,
+                                    s=s,
+                                    ss_pose_tokens=ss_pose_tokens,
+                                    target_pose_tokens=target_pose_tokens,
+                                    ood_target_pose_tokens=ood_target_pose_tokens,
+                                    is_last=is_last,
+                                )
+                            # export results with the iterations upper bound
+                            export_results(input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target, out_dir, compute_metrics=config.inference.get("compute_metrics"), n_iters=real_n_iters)
+                else:
+                    input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
+                        batch,
+                        num_input_views=config.training.num_input_views,
+                        num_target_views=3,
+                        has_target_image=True,
+                        training=False,
+                    )
+                    export_results(input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target, out_dir, compute_metrics=config.inference.get("compute_metrics"))
+            dist.barrier()
+            if ddp_info.is_main_process and config.inference.get("compute_metrics", False):
+                if is_ttt:
+                    for n_iters in iters:
+                        real_n_iters = n_iters
+                        if config.model.ttt.progressive:
+                            real_n_iters = min(n_iters, int(1 + (n_iters - 1) * min(1.0, max(0, (cur_train_step - config.model.ttt.warmup_steps) / config.model.ttt.warmup_steps))))
+                        input_psnr, input_lpips, input_ssim, \
+                            target_psnr, target_lpips, target_ssim, \
+                            ss_psnr, ss_lpips, ss_ssim, \
+                            ood_target_psnr, ood_target_lpips, ood_target_ssim = summarize_evaluation(out_dir, n_iters=real_n_iters)
+                        
+                        # log results in wandb
+                        test_name = f"test_{real_n_iters}iters"
+                        wandb.log({
+                            f"{test_name}/input_psnr": input_psnr,
+                            f"{test_name}/input_lpips": input_lpips,
+                            f"{test_name}/input_ssim": input_ssim,
+                            f"{test_name}/target_psnr": target_psnr,
+                            f"{test_name}/target_lpips": target_lpips,
+                            f"{test_name}/target_ssim": target_ssim,
+                            f"{test_name}/ss_psnr": ss_psnr,
+                            f"{test_name}/ss_lpips": ss_lpips,
+                            f"{test_name}/ss_ssim": ss_ssim,
+                            f"{test_name}/ood_target_psnr": ood_target_psnr,
+                            f"{test_name}/ood_target_lpips": ood_target_lpips,
+                            f"{test_name}/ood_target_ssim": ood_target_ssim,
+                        }, step=cur_train_step)
+                else:
+                    raise NotImplementedError("TTT without G3R supervision is not supported yet")
+                    # input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim, ss_psnr, ss_lpips, ss_ssim, ood_target_psnr, ood_target_lpips, ood_target_ssim = summarize_evaluation(out_dir)
+
     try:
-        # if start_train_step == cur_train_step:
-        #     print(f"Current Rank {ddp_info.local_rank} Restarting training from step {cur_train_step}. Resetting train_loader epoch to {cur_epoch}; might take a while...")
-        #     train_sampler.set_epoch(cur_epoch)
-        #     train_loader_iter = iter(train_loader)
         data = next(train_loader_iter)
     except StopIteration:
         print(f"Current Rank {ddp_info.local_rank} Ran out of data. Resetting train_loader epoch to {cur_epoch}; might take a while...")
@@ -229,9 +336,8 @@ while cur_train_step <= total_train_steps:
         # When we follow the G3R supervision manner, we backpropagate the supervision loss n times per data sample.
         n_iters = config.model.ttt.n_layer * config.model.ttt.n_iters_per_layer
         if config.model.ttt.progressive:
-            # if progressive, we train the model with less layers at the early stages:
-            # Heuristic: Linearly grow n_iters from 1 to its max value over the warmup period
-            n_iters = int(1 + (n_iters - 1) * min(1.0, cur_train_step / config.model.ttt.warmup_steps))
+            # run the first 10K iterations with 1 iters, then linearly grow to the max number of iters in the next 10K iterations
+            n_iters = min(n_iters, int(1 + (n_iters - 1) * min(1.0, max(0, (cur_train_step - config.model.ttt.warmup_steps) / config.model.ttt.warmup_steps))))
         input = None
         target = None
         ss = None
@@ -498,118 +604,6 @@ while cur_train_step <= total_train_steps:
             os.makedirs(vis_path, exist_ok=True)
             visualize_intermediate_results(vis_path, input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target)
             model.train()
-
-    # test on multiple nodes
-    if config.training.test_every > 0 and (cur_train_step % config.training.test_every == 0 or cur_train_step == 1):
-        export_inter_results = True
-        print_rank0(f"Running inference at step {cur_train_step}")
-        out_dir = os.path.join(config.training.checkpoint_dir, f"iter_{cur_train_step:08d}_inference")
-        os.makedirs(out_dir, exist_ok=True)
-        
-        # instantiate a new iterator every time we test
-        test_loader_iter = iter(test_loader)
-        with torch.no_grad(), torch.autocast(
-            enabled=config.training.use_amp,
-            device_type="cuda",
-            dtype=amp_dtype_mapping[config.training.amp_dtype],
-        ):
-            for (batch_idx, batch) in enumerate(test_loader_iter):
-                print(f"[Rank {ddp_info.local_rank}] Running inference on the {batch_idx}th batch")
-                if config.inference.get("first_n_batches", None) is not None and batch_idx >= config.inference.get("first_n_batches", None):
-                    break
-                batch = {k: v.to(ddp_info.device) if type(v) == torch.Tensor else v for k, v in batch.items()}
-                if is_ttt:
-                    for n_iters in iters:
-                        real_n_iters = n_iters
-                        if config.model.ttt.progressive:
-                            # bound the number of iterations by the warmup steps
-                            real_n_iters = int(1 + (n_iters - 1) * min(1.0, cur_train_step / config.model.ttt.warmup_steps))
-                        if config.model.ttt.supervise_mode != "g3r":
-                            raise NotImplementedError("TTT without G3R supervision is not supported yet")
-                        else:
-                            input = None
-                            target = None
-                            ss = None
-                            ood_target = None
-                            s = None
-                            ss_pose_tokens = None
-                            target_pose_tokens = None
-                            ood_target_pose_tokens = None
-                            ttt_metrics = {"layers": []}
-                            ttt_metrics["n_iters"] = real_n_iters
-
-                            for idx in range(real_n_iters):
-                                is_last = (idx == real_n_iters - 1)
-                                layer_idx = 0
-                                iter_idx = idx % config.model.ttt.n_iters_per_layer
-                                t = idx / real_n_iters
-
-                                # in g3r, input loss metrics and target loss metrics are calculated on the updated state s.
-                                input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss, s, ss_pose_tokens, target_pose_tokens, ood_target_pose_tokens, layer_metrics = model(
-                                    batch,
-                                    num_input_views=config.training.num_input_views,
-                                    num_target_views=3,
-                                    num_ss_views=config.training.num_ss_views,
-                                    num_ood_target_views=config.training.num_ood_target_views,
-                                    is_g3r=True,
-                                    has_target_image=True,
-                                    training=False,
-                                    layer_idx=layer_idx,
-                                    iter_idx=iter_idx,
-                                    t=t,
-                                    input=input,
-                                    target=target,
-                                    ss=ss,
-                                    ood_target=ood_target,
-                                    s=s,
-                                    ss_pose_tokens=ss_pose_tokens,
-                                    target_pose_tokens=target_pose_tokens,
-                                    ood_target_pose_tokens=ood_target_pose_tokens,
-                                    is_last=is_last,
-                                )
-                            # export results with the iterations upper bound
-                            export_results(input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target, out_dir, compute_metrics=config.inference.get("compute_metrics"), n_iters=real_n_iters)
-                else:
-                    input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
-                        batch,
-                        num_input_views=config.training.num_input_views,
-                        num_target_views=3,
-                        has_target_image=True,
-                        training=False,
-                    )
-                    export_results(input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target, out_dir, compute_metrics=config.inference.get("compute_metrics"))
-            dist.barrier()
-            if ddp_info.is_main_process and config.inference.get("compute_metrics", False):
-                if is_ttt:
-                    for n_iters in iters:
-                        real_n_iters = n_iters
-                        if config.model.ttt.progressive:
-                            # bound the number of iterations by the warmup steps
-                            real_n_iters = int(1 + (n_iters - 1) * min(1.0, cur_train_step / config.model.ttt.warmup_steps))
-                        input_psnr, input_lpips, input_ssim, \
-                            target_psnr, target_lpips, target_ssim, \
-                            ss_psnr, ss_lpips, ss_ssim, \
-                            ood_target_psnr, ood_target_lpips, ood_target_ssim = summarize_evaluation(out_dir, n_iters=real_n_iters)
-                        
-                        # log results in wandb
-                        test_name = f"test_{real_n_iters}iters"
-                        wandb.log({
-                            f"{test_name}/input_psnr": input_psnr,
-                            f"{test_name}/input_lpips": input_lpips,
-                            f"{test_name}/input_ssim": input_ssim,
-                            f"{test_name}/target_psnr": target_psnr,
-                            f"{test_name}/target_lpips": target_lpips,
-                            f"{test_name}/target_ssim": target_ssim,
-                            f"{test_name}/ss_psnr": ss_psnr,
-                            f"{test_name}/ss_lpips": ss_lpips,
-                            f"{test_name}/ss_ssim": ss_ssim,
-                            f"{test_name}/ood_target_psnr": ood_target_psnr,
-                            f"{test_name}/ood_target_lpips": ood_target_lpips,
-                            f"{test_name}/ood_target_ssim": ood_target_ssim,
-                        }, step=cur_train_step)
-                else:
-                    raise NotImplementedError("TTT without G3R supervision is not supported yet")
-                    # input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim, ss_psnr, ss_lpips, ss_ssim, ood_target_psnr, ood_target_lpips, ood_target_ssim = summarize_evaluation(out_dir)
     
     # delete all tensors
     del batch, input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss, ttt_metrics
