@@ -64,7 +64,7 @@ Dataset = importlib.import_module(module).__dict__[class_name]
 # training set
 train_set = Dataset(
     image_size=config.model.image_tokenizer.image_size,
-    dataset_path="re10k_preprocessed/train",
+    dataset_path="re10k_preprocessed/train.zip",
     num_input_views=config.training.num_input_views, 
     num_target_views=config.training.num_target_views, 
     num_ss_views=config.training.num_ss_views,
@@ -89,7 +89,7 @@ if config.training.test_every > 0:
     # test set, use sampler to keep align with LVSM official testset sampling
     test_set = Dataset(
         image_size=config.model.image_tokenizer.image_size,
-        dataset_path="re10k_preprocessed/test",
+        dataset_path="re10k_preprocessed/test.zip",
         num_input_views=2,
         num_target_views=3,
         num_ss_views=config.training.num_ss_views,

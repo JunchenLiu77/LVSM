@@ -9,6 +9,8 @@ import torch
 from torch.utils.data import Dataset
 import json
 import torch.nn.functional as F
+import zipfile
+from io import BytesIO
 
 
 
@@ -25,10 +27,27 @@ class Dataset(Dataset):
         self.min_dist = min_dist
         self.max_dist = max_dist
         self.inference = inference
+        
+        # Check if dataset_path is a zip file
+        self.is_zip = dataset_path.endswith('.zip') and os.path.isfile(dataset_path)
+        self.zip_path = dataset_path if self.is_zip else None
 
         # list all scenes in the dataset
-        scenes = os.listdir(dataset_path)
-        all_scene_paths = [os.path.join(dataset_path, scene) for scene in scenes]
+        if self.is_zip:
+            print(f"Loading zip file: {dataset_path}")
+            with zipfile.ZipFile(dataset_path, 'r') as zf:
+                # Get all scene directories (folders containing scene_info.json)
+                all_files = zf.namelist()
+                scene_dirs = set()
+                for file_path in all_files:
+                    if 'scene_info.json' in file_path:
+                        # Extract the scene directory path
+                        scene_dir = os.path.dirname(file_path)
+                        scene_dirs.add(scene_dir)
+                all_scene_paths = sorted(list(scene_dirs))
+        else:
+            scenes = os.listdir(dataset_path)
+            all_scene_paths = [os.path.join(dataset_path, scene) for scene in scenes]
 
         # Load file that specifies the input and target view indices to use for inference
         if self.inference:
@@ -41,38 +60,98 @@ class Dataset(Dataset):
                 view_idx_list_filtered = [k for k, v in view_idx_list.items() if v is not None]
                 filtered_scene_paths = []
                 for scene in all_scene_paths:
-                    scene_name = scene.split("/")[-1]
+                    if self.is_zip:
+                        # For zip files, scene path doesn't have dataset_path prefix
+                        scene_name = os.path.basename(scene)
+                    else:
+                        scene_name = scene.split("/")[-1]
                     if scene_name in view_idx_list_filtered:
                         filtered_scene_paths.append(scene)
 
-                all_scene_paths = filtered_scene_paths
+            print(f"Found {len(view_idx_list_filtered)} scenes in index file, {len(filtered_scene_paths)} scenes exist in the dataset.")
+            all_scene_paths = filtered_scene_paths
             
             # prevent memory leaking by converting dict to numpy array
             # https://github.com/pytorch/pytorch/issues/13246#issuecomment-905703662
             # https://github.com/pytorch/pytorch/issues/13246#issuecomment-715050814
             input_idx_list_np, target_idx_list_np, ss_idx_list_np, ood_target_idx_list_np = [], [], [], []
-            for scene_path in all_scene_paths:
-                json_file_path = os.path.join(scene_path, "scene_info.json")
-                data_json = json.load(open(json_file_path, 'r'))
-                scene_name = data_json["scene_name"]
-                assert scene_name in view_idx_list, f"Scene {scene_name} is not in the view idx list."
-                input_idx_list_np.append(view_idx_list[scene_name]["input"])
-                target_idx_list_np.append(view_idx_list[scene_name]["target"])
-                ss_idx_list_np.append(view_idx_list[scene_name]["ss"])
-                ood_target_idx_list_np.append(view_idx_list[scene_name]["ood_target"])
+            
+            if self.is_zip:
+                # Open zip file once and reuse it for all scenes
+                with zipfile.ZipFile(self.zip_path, 'r') as zf:
+                    for scene_path in all_scene_paths:
+                        json_file_path = os.path.join(scene_path, "scene_info.json")
+                        with zf.open(json_file_path) as f:
+                            data_json = json.load(f)
+                        scene_name = data_json["scene_name"]
+                        assert scene_name in view_idx_list, f"Scene {scene_name} is not in the view idx list."
+                        input_idx_list_np.append(view_idx_list[scene_name]["input"])
+                        target_idx_list_np.append(view_idx_list[scene_name]["target"])
+                        ss_idx_list_np.append(view_idx_list[scene_name]["ss"])
+                        ood_target_idx_list_np.append(view_idx_list[scene_name]["ood_target"])
+            else:
+                for scene_path in all_scene_paths:
+                    json_file_path = os.path.join(scene_path, "scene_info.json")
+                    data_json = json.load(open(json_file_path, 'r'))
+                    scene_name = data_json["scene_name"]
+                    assert scene_name in view_idx_list, f"Scene {scene_name} is not in the view idx list."
+                    input_idx_list_np.append(view_idx_list[scene_name]["input"])
+                    target_idx_list_np.append(view_idx_list[scene_name]["target"])
+                    ss_idx_list_np.append(view_idx_list[scene_name]["ss"])
+                    ood_target_idx_list_np.append(view_idx_list[scene_name]["ood_target"])
             self.input_idx_list_np = np.array(input_idx_list_np).astype(np.int32)
             self.target_idx_list_np = np.array(target_idx_list_np).astype(np.int32)
             self.ss_idx_list_np = np.array(ss_idx_list_np).astype(np.int32)
             self.ood_target_idx_list_np = np.array(ood_target_idx_list_np).astype(np.int32)
-            print(f"Found {len(input_idx_list_np)} scenes in index file, {len(all_scene_paths)} scenes exist in the dataset.")
         
         print(f"Using {len(all_scene_paths)} scenes")
         # prevent memory leaking by converting string list to numpy array
         self.all_scene_paths = np.array(all_scene_paths).astype(np.bytes_)
+        
+        # For zip files, extract the base directory name (first component of scene path)
+        # This is needed because image_paths in JSON are relative to dataset root,
+        # but zip file stores them with base directory prefix
+        if self.is_zip and len(all_scene_paths) > 0:
+            # Get the first scene path and extract base directory
+            first_scene = all_scene_paths[0]
+            # scene_path is like "test/b12a86f213f4b4f7", we need "test"
+            # Zip files always use forward slashes
+            parts = first_scene.split('/')
+            if len(parts) > 0:
+                self.zip_base_dir = parts[0]
+            else:
+                self.zip_base_dir = ""
+        else:
+            self.zip_base_dir = None
+        
+        # For zip files, we'll open a ZipFile object per worker process
+        # This is initialized lazily in __getitem__ to work with multiprocessing
+        self._zip_file = None
+        self._worker_id = None
 
 
     def __len__(self):
         return len(self.all_scene_paths)
+
+    
+    def _get_zip_file(self):
+        """Get or create a ZipFile object for the current worker process."""
+        if not self.is_zip:
+            return None
+        
+        # Check if we're in a different worker process
+        import torch.utils.data
+        worker_info = torch.utils.data.get_worker_info()
+        worker_id = worker_info.id if worker_info is not None else -1
+        
+        # Create a new ZipFile if we're in a new worker or don't have one yet
+        if self._zip_file is None or self._worker_id != worker_id:
+            if self._zip_file is not None:
+                self._zip_file.close()
+            self._zip_file = zipfile.ZipFile(self.zip_path, 'r')
+            self._worker_id = worker_id
+        
+        return self._zip_file
 
 
     def preprocess_poses(
@@ -165,7 +244,14 @@ class Dataset(Dataset):
         # try:
         scene_path = str(self.all_scene_paths[idx], encoding="utf-8").strip()
         json_file_path = os.path.join(scene_path, "scene_info.json")
-        data_json = json.load(open(json_file_path, 'r'))
+        
+        if self.is_zip:
+            zf = self._get_zip_file()
+            with zf.open(json_file_path) as f:
+                data_json = json.load(f)
+        else:
+            data_json = json.load(open(json_file_path, 'r'))
+        
         frames = data_json["frames"]
         scene_name = data_json["scene_name"]
 
@@ -193,13 +279,30 @@ class Dataset(Dataset):
         c2ws = self.preprocess_poses(c2ws, scene_scale_factor=1.35)
 
         images = []
-        for image_path in image_paths:
-            abs_image_path = os.path.join(self.dataset_path, image_path)
-            image = Image.open(abs_image_path)
-            assert image.size == (self.image_size, self.image_size), f"Image {image_path} is not {self.image_size}x{self.image_size}"
-            image = np.array(image) / 255.0
-            image = torch.from_numpy(image).permute(2, 0, 1).float()
-            images.append(image)
+        if self.is_zip:
+            zf = self._get_zip_file()
+            for image_path in image_paths:
+                # image_path from JSON is relative to dataset root (e.g., "b12a86f213f4b4f7/00000.png")
+                # but zip file stores it with base directory prefix (e.g., "test/b12a86f213f4b4f7/00000.png")
+                # Zip files always use forward slashes
+                if self.zip_base_dir:
+                    zip_image_path = f"{self.zip_base_dir}/{image_path}"
+                else:
+                    zip_image_path = image_path
+                with zf.open(zip_image_path) as f:
+                    image = Image.open(BytesIO(f.read()))
+                    assert image.size == (self.image_size, self.image_size), f"Image {image_path} is not {self.image_size}x{self.image_size}"
+                    image = np.array(image) / 255.0
+                    image = torch.from_numpy(image).permute(2, 0, 1).float()
+                    images.append(image)
+        else:
+            for image_path in image_paths:
+                abs_image_path = os.path.join(self.dataset_path, image_path)
+                image = Image.open(abs_image_path)
+                assert image.size == (self.image_size, self.image_size), f"Image {image_path} is not {self.image_size}x{self.image_size}"
+                image = np.array(image) / 255.0
+                image = torch.from_numpy(image).permute(2, 0, 1).float()
+                images.append(image)
         images = torch.stack(images, dim=0)
 
         image_indices = torch.tensor(image_indices).long().unsqueeze(-1)  # [v, 1]
