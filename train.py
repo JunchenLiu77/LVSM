@@ -79,7 +79,7 @@ train_loader = DataLoader(
     batch_size=config.training.batch_size_per_gpu,
     num_workers=config.training.num_workers,
     persistent_workers=True,
-    pin_memory=False,
+    pin_memory=True,
     prefetch_factor=config.training.prefetch_factor,
     sampler=train_sampler,
 )

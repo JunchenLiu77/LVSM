@@ -80,7 +80,7 @@ training:
     min_frame_dist: 25
 
   # dataloader
-  num_workers: 4
+  num_workers: 2
   prefetch_factor: 32
 
   # loss & grad

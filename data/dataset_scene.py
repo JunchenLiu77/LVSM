@@ -76,29 +76,13 @@ class Dataset(Dataset):
             # https://github.com/pytorch/pytorch/issues/13246#issuecomment-715050814
             input_idx_list_np, target_idx_list_np, ss_idx_list_np, ood_target_idx_list_np = [], [], [], []
             
-            if self.is_zip:
-                # Open zip file once and reuse it for all scenes
-                with zipfile.ZipFile(self.zip_path, 'r') as zf:
-                    for scene_path in all_scene_paths:
-                        json_file_path = os.path.join(scene_path, "scene_info.json")
-                        with zf.open(json_file_path) as f:
-                            data_json = json.load(f)
-                        scene_name = data_json["scene_name"]
-                        assert scene_name in view_idx_list, f"Scene {scene_name} is not in the view idx list."
-                        input_idx_list_np.append(view_idx_list[scene_name]["input"])
-                        target_idx_list_np.append(view_idx_list[scene_name]["target"])
-                        ss_idx_list_np.append(view_idx_list[scene_name]["ss"])
-                        ood_target_idx_list_np.append(view_idx_list[scene_name]["ood_target"])
-            else:
-                for scene_path in all_scene_paths:
-                    json_file_path = os.path.join(scene_path, "scene_info.json")
-                    data_json = json.load(open(json_file_path, 'r'))
-                    scene_name = data_json["scene_name"]
-                    assert scene_name in view_idx_list, f"Scene {scene_name} is not in the view idx list."
-                    input_idx_list_np.append(view_idx_list[scene_name]["input"])
-                    target_idx_list_np.append(view_idx_list[scene_name]["target"])
-                    ss_idx_list_np.append(view_idx_list[scene_name]["ss"])
-                    ood_target_idx_list_np.append(view_idx_list[scene_name]["ood_target"])
+            for scene_path in all_scene_paths:
+                scene_name = os.path.basename(scene_path)
+                assert scene_name in view_idx_list, f"Scene {scene_name} is not in the view idx list."
+                input_idx_list_np.append(view_idx_list[scene_name]["input"])
+                target_idx_list_np.append(view_idx_list[scene_name]["target"])
+                ss_idx_list_np.append(view_idx_list[scene_name]["ss"])
+                ood_target_idx_list_np.append(view_idx_list[scene_name]["ood_target"])
             self.input_idx_list_np = np.array(input_idx_list_np).astype(np.int32)
             self.target_idx_list_np = np.array(target_idx_list_np).astype(np.int32)
             self.ss_idx_list_np = np.array(ss_idx_list_np).astype(np.int32)
@@ -290,10 +274,11 @@ class Dataset(Dataset):
                 else:
                     zip_image_path = image_path
                 with zf.open(zip_image_path) as f:
-                    image = Image.open(BytesIO(f.read()))
+                    # Open directly from the zip file handle to avoid duplicating bytes in memory
+                    image = Image.open(f).convert('RGB')
                     assert image.size == (self.image_size, self.image_size), f"Image {image_path} is not {self.image_size}x{self.image_size}"
-                    image = np.array(image) / 255.0
-                    image = torch.from_numpy(image).permute(2, 0, 1).float()
+                    image = (np.array(image) / 255.0).astype(np.float32)
+                    image = torch.from_numpy(image).permute(2, 0, 1)
                     images.append(image)
         else:
             for image_path in image_paths:
