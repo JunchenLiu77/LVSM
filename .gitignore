@@ -148,4 +148,4 @@ ckpts
 # debug folder
 debug/
 
-re10k_preprocessed/
+re10k_preprocessed
