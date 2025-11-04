@@ -149,3 +149,6 @@ ckpts
 debug/
 
 re10k_preprocessed
+logs
+job_script.sh
+srun_sub.sh
