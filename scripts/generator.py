@@ -44,7 +44,7 @@ class Generator:
             'account': 'aip-fsanja',
             'time': '01-00:00:00',
             'nodes': 1,
-            'mem': '48GB',
+            'mem': '40GB',
             'cpus_per_task': 8,
             'gpu_type': 'l40s',
             'gpu_count': 2,
@@ -331,9 +331,9 @@ class Generator:
         if args.gpus is not None:
             slurm['gpu_count'] = args.gpus
             slurm['cpus_per_task'] = args.gpus * 4
+            slurm['mem'] = f'{args.gpus * 20}GB'
         if args.gpu_type is not None:
             slurm['gpu_type'] = args.gpu_type
-            slurm['mem'] = '48GB' if args.gpu_type == 'l40s' else '80GB'
         
         # Determine which Python script to use
         if args.inference is not None:
@@ -386,7 +386,15 @@ module load cuda/12.2
 export OMP_NUM_THREADS=4
 export IBV_FORK_SAFE=1
 export MASTER_ADDR=localhost
-export MASTER_PORT=$(shuf -i 20000-65000 -n 1)
+# Pick a free TCP port once per job for all ranks
+export MASTER_PORT=$(python3 - <<'PY'
+import socket
+s=socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(("", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)
 {'export CUBLAS_WORKSPACE_CONFIG=:4096:8' if args.inference else ''}
 
 # Optimized NCCL settings (P2P and IB enabled for L40s or H100)
