@@ -1,7 +1,14 @@
 # run this script with 4 gpus
 export EXP_NAME="nov1_base"
+export MASTER_ADDR=localhost
+export MASTER_PORT=$(python3 -c "import socket as s; x=s.socket(s.AF_INET,s.SOCK_STREAM); x.bind(('',0)); print(x.getsockname()[1]); x.close()")
+echo "EXP_NAME: $EXP_NAME"
+echo "MASTER_ADDR: $MASTER_ADDR"
+echo "MASTER_PORT: $MASTER_PORT"
 torchrun \
     --nproc_per_node=4 \
+    --master_addr=$MASTER_ADDR \
+    --master_port=$MASTER_PORT \
     train.py \
     --config configs/LVSM_scene_encoder_decoder_ttt.yaml \
     training.checkpoint_dir="results/${EXP_NAME}" \
@@ -23,7 +30,6 @@ torchrun \
     training.lr=0.0001 \
     training.warmup=3000 \
     training.resume_ckpt="./ckpts/scene_encoder_decoder_256.pt" \
-    training.reset_training_state=true \
     training.wandb_exp_name="${EXP_NAME}" \
     training.scheduler_type=cosine \
     training.checkpoint_every=500 \
