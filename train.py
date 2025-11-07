@@ -6,12 +6,16 @@ import time
 import wandb
 import torch
 import random
+import json
+import csv
 from rich import print
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 import torch.distributed as dist
 from setup import init_config, init_distributed, init_wandb_and_backup
 from utils.metric_utils import visualize_intermediate_results, summarize_evaluation, export_results
+from utils.training_utils import find_checkpoints
+from PIL import Image
 
 # Mute noisy warnings/logs from torch.compile/inductor
 import warnings
@@ -31,13 +35,25 @@ config = init_config()
 
 os.environ["OMP_NUM_THREADS"] = str(config.training.get("num_threads", 1))
 
+# Check if there are some checkpoints in the checkpoint_dir, if so, we will update the seed
+seed = config.training.seed
+checkpoint_dir = config.training.checkpoint_dir
+all_ckpt_paths = find_checkpoints(checkpoint_dir)
+if len(all_ckpt_paths) > 0:
+    ckpt_path = all_ckpt_paths[-1]
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
+    train_step = checkpoint["fwdbwd_pass_step"]
+    seed = seed + train_step
+    print(f"use seed {seed}")
+
 # Set up DDP for training/inference and Fix random seed
-ddp_info = init_distributed(seed=config.training.seed)
+ddp_info = init_distributed(seed=seed)
 dist.barrier()
 
 # Set up wandb and backup source code
 if ddp_info.is_main_process:
-    init_wandb_and_backup(config)
+    # Resume W&B if checkpoints exist to continue previous curves
+    init_wandb_and_backup(config, resume=(len(all_ckpt_paths) > 0))
 dist.barrier()
 
 
@@ -73,7 +89,7 @@ train_set = Dataset(
     max_dist=100,
     inference=False
 )
-train_sampler = DistributedSampler(train_set, shuffle=True, seed=config.training.seed, drop_last=True)
+train_sampler = DistributedSampler(train_set, shuffle=True, seed=seed, drop_last=True)
 train_loader = DataLoader(
     train_set,
     batch_size=config.training.batch_size_per_gpu,
@@ -155,22 +171,22 @@ lr_scheduler = create_lr_scheduler(
     scheduler_type=scheduler_type,
 )
 
-
-if config.training.get("resume_ckpt", "") != "":
-    ckpt_load_path = config.training.resume_ckpt
-else:
-    ckpt_load_path = config.training.checkpoint_dir
-reset_training_state = config.training.get("reset_training_state", False)
+# change logic here:
+# - if there are some checkpoints in the checkpoint_dir, we always resume from the latest checkpoint
+# we don't reset training state and use the new seed for the next training
+# - if there are no checkpoints in the checkpoint_dir, we check if the resume_ckpt is provided
+# if so, we resume from the resume_ckpt and reset training state
+# if not, we start from scratch
 
 cur_train_step = 0
 cur_param_update_step = 0
-if config.training.get("resume_ckpt", "") != "":
+if all_ckpt_paths or (config.training.get("resume_ckpt", "") != ""):
     optimizer, lr_scheduler, cur_train_step, cur_param_update_step = auto_resume_job(
-        ckpt_load_path,
+        config.training.checkpoint_dir,
+        config.training.resume_ckpt,
         model,
         optimizer,
         lr_scheduler,
-        reset_training_state,
     )
 cur_epoch = int(cur_train_step * (total_batch_size / grad_accum_steps) // len(train_set))
 train_sampler.set_epoch(cur_epoch)
@@ -213,7 +229,6 @@ while cur_train_step <= total_train_steps:
 
     # test on multiple nodes - run before optimizer update to test at initial state
     if config.training.test_every > 0 and (cur_train_step == 0 or cur_train_step % config.training.test_every == 0):
-        export_inter_results = True
         print_rank0(f"Running inference at step {cur_train_step} (before optimizer update)")
         out_dir = os.path.join(config.training.checkpoint_dir, f"iter_{cur_train_step:08d}_inference")
         os.makedirs(out_dir, exist_ok=True)
@@ -225,10 +240,12 @@ while cur_train_step <= total_train_steps:
             device_type="cuda",
             dtype=amp_dtype_mapping[config.training.amp_dtype],
         ):
+            # accumulate metrics across all test batches this inference step
+            metrics = {}
             for (batch_idx, batch) in enumerate(test_loader_iter):
-                print(f"[Rank {ddp_info.local_rank}] Running inference on the {batch_idx}th batch")
                 if config.inference.get("first_n_batches", None) is not None and batch_idx >= config.inference.get("first_n_batches", None):
                     break
+                print(f"[Rank {ddp_info.local_rank}] Running inference on the {batch_idx}th batch")
                 batch = {k: v.to(ddp_info.device) if type(v) == torch.Tensor else v for k, v in batch.items()}
                 if is_ttt:
                     for n_iters in iters:
@@ -278,8 +295,17 @@ while cur_train_step <= total_train_steps:
                                     ood_target_pose_tokens=ood_target_pose_tokens,
                                     is_last=is_last,
                                 )
-                            # export results with the iterations upper bound
-                            export_results(input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target, out_dir, compute_metrics=config.inference.get("compute_metrics"), n_iters=real_n_iters)
+                            # export results with the iterations upper bound, merge per-batch
+                            per_scene_metrics = export_results(
+                                input, target, ss, ood_target,
+                                rendered_input, rendered_target, rendered_ss, rendered_ood_target,
+                                out_dir,
+                                compute_metrics=config.inference.get("compute_metrics"),
+                                n_iters=real_n_iters,
+                            )
+                            if real_n_iters not in metrics:
+                                metrics[real_n_iters] = {}
+                            metrics[real_n_iters].update(per_scene_metrics)
                 else:
                     input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
                         batch,
@@ -288,35 +314,146 @@ while cur_train_step <= total_train_steps:
                         has_target_image=True,
                         training=False,
                     )
-                    export_results(input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target, out_dir, compute_metrics=config.inference.get("compute_metrics"))
+                    per_scene_metrics = export_results(
+                        input, target, ss, ood_target,
+                        rendered_input, rendered_target, rendered_ss, rendered_ood_target,
+                        out_dir,
+                        compute_metrics=config.inference.get("compute_metrics"),
+                    )
+                    # ugly but necessary, since the metrics is a nested dict
+                    if 1 not in metrics:
+                        metrics[1] = {}
+                    metrics[1].update(per_scene_metrics)
+            print(f"[debugging] 1")
             dist.barrier()
-            if ddp_info.is_main_process and config.inference.get("compute_metrics", False):
+            print(f"[debugging] 2")
+            if config.inference.get("compute_metrics", False):
                 if is_ttt:
                     for n_iters in iters:
                         real_n_iters = n_iters
                         if config.model.ttt.progressive:
                             real_n_iters = min(n_iters, int(1 + (n_iters - 1) * min(1.0, max(0, (cur_train_step - config.model.ttt.warmup_steps) / config.model.ttt.warmup_steps))))
-                        input_psnr, input_lpips, input_ssim, \
-                            target_psnr, target_lpips, target_ssim, \
-                            ss_psnr, ss_lpips, ss_ssim, \
-                            ood_target_psnr, ood_target_lpips, ood_target_ssim = summarize_evaluation(out_dir, n_iters=real_n_iters)
-                        
-                        # log results in wandb
+                        # input_psnr, input_lpips, input_ssim, \
+                        #     target_psnr, target_lpips, target_ssim, \
+                        #     ss_psnr, ss_lpips, ss_ssim, \
+                        #     ood_target_psnr, ood_target_lpips, ood_target_ssim = summarize_evaluation(out_dir, n_iters=real_n_iters)
+
+                        # gather metrics from all ranks
+                        def gather_metrics(local_metrics):
+                            """
+                            Gather nested metrics dicts from all ranks and merge by n_iters -> uid.
+                            Structure: {n_iters: {uid: metrics_dict}}
+                            """
+                            gathered = [None for _ in range(ddp_info.world_size)]
+                            dist.all_gather_object(gathered, local_metrics)
+                            merged = {}
+                            for part in gathered:
+                                if not part:
+                                    continue
+                                for k_iters, by_uid in part.items():
+                                    if k_iters not in merged:
+                                        merged[k_iters] = {}
+                                    merged[k_iters].update(by_uid)
+                            return merged
+
+                        metrics = gather_metrics(metrics)
+                        print(f"[debugging] 3")
+
+                        # Save combined JSON and CSV averages, then log to wandb
                         test_name = f"test_{real_n_iters}iters"
-                        wandb.log({
-                            f"{test_name}/input_psnr": input_psnr,
-                            f"{test_name}/input_lpips": input_lpips,
-                            f"{test_name}/input_ssim": input_ssim,
-                            f"{test_name}/target_psnr": target_psnr,
-                            f"{test_name}/target_lpips": target_lpips,
-                            f"{test_name}/target_ssim": target_ssim,
-                            f"{test_name}/ss_psnr": ss_psnr,
-                            f"{test_name}/ss_lpips": ss_lpips,
-                            f"{test_name}/ss_ssim": ss_ssim,
-                            f"{test_name}/ood_target_psnr": ood_target_psnr,
-                            f"{test_name}/ood_target_lpips": ood_target_lpips,
-                            f"{test_name}/ood_target_ssim": ood_target_ssim,
-                        }, step=cur_train_step)
+                        if ddp_info.is_main_process:
+                            # Persist merged per-scene metrics JSON (sorted by uid)
+                            all_scenes = metrics.get(real_n_iters, {})
+                            json_path = os.path.join(out_dir, f"{real_n_iters}iters_metrics.json")
+                            try:
+                                sorted_items = sorted(all_scenes.items(), key=lambda kv: int(kv[0]) if not isinstance(kv[0], int) else kv[0])
+                                ordered = {f"{int(uid):06d}": data for uid, data in sorted_items}
+                                with open(json_path, "w") as f:
+                                    json.dump(ordered, f, indent=2)
+                            except Exception:
+                                pass
+
+                            # Compute averages
+                            metric_keys = [
+                                "input_psnr", "input_lpips", "input_ssim",
+                                "target_psnr", "target_lpips", "target_ssim",
+                                "ss_psnr", "ss_lpips", "ss_ssim",
+                                "ood_target_psnr", "ood_target_lpips", "ood_target_ssim",
+                            ]
+                            summaries = [scene_metrics["summary"] for scene_metrics in all_scenes.values()]
+                            averages = {k: 0.0 for k in metric_keys}
+                            if len(summaries) > 0:
+                                for k in metric_keys:
+                                    averages[k] = sum(s[k] for s in summaries) / len(summaries)
+                            else:
+                                # keep zeros if no scenes gathered
+                                pass
+
+                            # Write CSV with per-scene summaries and averages (sorted by uid, .4f precision)
+                            csv_path = os.path.join(out_dir, f"{real_n_iters}iters_summary.csv")
+                            try:
+                                with open(csv_path, "w", newline="") as f:
+                                    writer = csv.writer(f)
+                                    # header
+                                    writer.writerow(["Index"] + metric_keys)
+                                    # rows per scene
+                                    for uid, scene in sorted(all_scenes.items(), key=lambda kv: int(kv[0]) if not isinstance(kv[0], int) else kv[0]):
+                                        summary = scene.get("summary", {})
+                                        row = [f"{int(uid):06d}"] + [f"{summary.get(k, 0.0):.4f}" for k in metric_keys]
+                                        writer.writerow(row)
+                                    # blank line and averages
+                                    writer.writerow([])
+                                    avg_row = ["average"] + [f"{averages[k]:.4f}" for k in metric_keys]
+                                    writer.writerow(avg_row)
+                            except Exception:
+                                pass
+
+                            # Map averages to names expected in wandb logging below
+                            input_psnr = averages["input_psnr"]
+                            input_lpips = averages["input_lpips"]
+                            input_ssim = averages["input_ssim"]
+                            target_psnr = averages["target_psnr"]
+                            target_lpips = averages["target_lpips"]
+                            target_ssim = averages["target_ssim"]
+                            ss_psnr = averages["ss_psnr"]
+                            ss_lpips = averages["ss_lpips"]
+                            ss_ssim = averages["ss_ssim"]
+                            ood_target_psnr = averages["ood_target_psnr"]
+                            ood_target_lpips = averages["ood_target_lpips"]
+                            ood_target_ssim = averages["ood_target_ssim"]
+                            wandb.log({
+                                f"{test_name}/input_psnr": input_psnr,
+                                f"{test_name}/input_lpips": input_lpips,
+                                f"{test_name}/input_ssim": input_ssim,
+                                f"{test_name}/target_psnr": target_psnr,
+                                f"{test_name}/target_lpips": target_lpips,
+                                f"{test_name}/target_ssim": target_ssim,
+                                f"{test_name}/ss_psnr": ss_psnr,
+                                f"{test_name}/ss_lpips": ss_lpips,
+                                f"{test_name}/ss_ssim": ss_ssim,
+                                f"{test_name}/ood_target_psnr": ood_target_psnr,
+                                f"{test_name}/ood_target_lpips": ood_target_lpips,
+                                f"{test_name}/ood_target_ssim": ood_target_ssim,
+                            }, step=cur_train_step)
+
+                        # log scene images to wandb, only uid 162 and 183 scenes are logged
+                        if ddp_info.is_main_process:
+                            for uid in [162, 183]:
+                                sample_dir = os.path.join(out_dir, f"{uid:06d}")
+                                if not os.path.exists(sample_dir):
+                                    continue
+                                prefix = f"{real_n_iters}iters_"
+                                input_img = Image.open(os.path.join(sample_dir, f"{prefix}input.png"))
+                                target_img = Image.open(os.path.join(sample_dir, f"{prefix}target.png"))
+                                ss_img = Image.open(os.path.join(sample_dir, f"{prefix}ss.png"))
+                                ood_target_img = Image.open(os.path.join(sample_dir, f"{prefix}ood_target.png"))
+                                wandb.log({
+                                    f"{test_name}/uid_{uid}/input": wandb.Image(input_img),
+                                    f"{test_name}/uid_{uid}/target": wandb.Image(target_img),
+                                    f"{test_name}/uid_{uid}/ss": wandb.Image(ss_img),
+                                    f"{test_name}/uid_{uid}/ood_target": wandb.Image(ood_target_img),
+                                }, step=cur_train_step)
+
                 else:
                     raise NotImplementedError("TTT without G3R supervision is not supported yet")
                     # input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim, ss_psnr, ss_lpips, ss_ssim, ood_target_psnr, ood_target_lpips, ood_target_ssim = summarize_evaluation(out_dir)
@@ -475,7 +612,7 @@ while cur_train_step <= total_train_steps:
     # for g3r, the lr scheduler will be updated after all the inner iterations are done
     lr_scheduler.step()
     cur_train_step += 1
-    export_inter_results = ((cur_train_step-1) == start_train_step) or (cur_train_step % config.training.vis_every == 0)
+    export_inter_results = (((cur_train_step-1) == start_train_step) or (cur_train_step % config.training.vis_every == 0) and (config.training.vis_every > 0))
 
     # log and save checkpoint
     if ddp_info.is_main_process:
@@ -599,11 +736,11 @@ while cur_train_step <= total_train_steps:
                     os.remove(os.path.join(config.training.checkpoint_dir, ckpt))
 
         # export intermediate visualization results
-        if export_inter_results:
-            vis_path = os.path.join(config.training.checkpoint_dir, f"iter_{cur_train_step:08d}")
-            os.makedirs(vis_path, exist_ok=True)
-            visualize_intermediate_results(vis_path, input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target)
-            model.train()
+        # if export_inter_results:
+        #     vis_path = os.path.join(config.training.checkpoint_dir, f"iter_{cur_train_step:08d}")
+        #     os.makedirs(vis_path, exist_ok=True)
+        #     visualize_intermediate_results(vis_path, input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target)
+        #     model.train()
     
     # delete all tensors
     del batch, input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss, ttt_metrics
@@ -613,9 +750,7 @@ while cur_train_step <= total_train_steps:
         del input_loss_dict, target_loss_dict, ss_loss_dict, ood_target_loss_dict
     torch.cuda.empty_cache()
     
-    if export_inter_results:
-        dist.barrier()
-        
+    dist.barrier() 
 
 dist.barrier()
 dist.destroy_process_group()

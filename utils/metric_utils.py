@@ -146,11 +146,11 @@ def export_results(
     """
     os.makedirs(out_dir, exist_ok=True)
     
+    metrics = {}
     for batch_idx in range(input.image.size(0)):
         uid = input.index[batch_idx, 0, -1].item()
         scene_name = input.scene_name[batch_idx]
         sample_dir = os.path.join(out_dir, f"{uid:06d}")
-        os.makedirs(sample_dir, exist_ok=True)
         
         # Get target view indices
         input_indices = input.index[batch_idx, :, 0].cpu().numpy()
@@ -159,23 +159,26 @@ def export_results(
         ood_target_indices = ood_target.index[batch_idx, :, 0].cpu().numpy()
         
         # Save images
-        _save_images(
-            input, 
-            target, 
-            ss,
-            ood_target,
-            rendered_input, 
-            rendered_target, 
-            rendered_ss,
-            rendered_ood_target,
-            batch_idx, 
-            sample_dir, 
-            n_iters
-        )
+        if uid in [162, 183]:
+            # only dump partial images
+            os.makedirs(sample_dir, exist_ok=True)
+            _save_images(
+                input, 
+                target, 
+                ss,
+                ood_target,
+                rendered_input, 
+                rendered_target, 
+                rendered_ss,
+                rendered_ood_target,
+                batch_idx, 
+                sample_dir, 
+                n_iters
+            )
         
         # Compute and save metrics if requested
         if compute_metrics:
-            _save_metrics(
+            single_metrics = _save_metrics(
                 input.image[batch_idx],
                 target.image[batch_idx],
                 ss.image[batch_idx],
@@ -192,10 +195,13 @@ def export_results(
                 scene_name,
                 n_iters
             )
+            metrics[uid] = single_metrics
         
         # Save video if available
         # if hasattr(result, "video_rendering"):
         #     _save_video(result.video_rendering[batch_idx], sample_dir)
+    
+    return metrics
 
 
 def visualize_intermediate_results(out_dir, input, target, ss, ood_target, rendered_input, rendered_target, rendered_ss, rendered_ood_target):
@@ -314,9 +320,12 @@ def _save_metrics(input, target, ss, ood_target, rendered_input, rendered_target
         })
     
     # Save metrics to a single JSON file
-    prefix = f"{n_iters}iters_" if (n_iters is not None) else ""
-    with open(os.path.join(out_dir, f"{prefix}metrics.json"), "w") as f:
-        json.dump(metrics, f, indent=2)
+    # prefix = f"{n_iters}iters_" if (n_iters is not None) else ""
+    # with open(os.path.join(out_dir, f"{prefix}metrics.json"), "w") as f:
+    #     json.dump(metrics, f, indent=2)
+
+    # instead of saving to json file, return the metrics
+    return metrics
 
 
 def _save_video(frames, out_dir):

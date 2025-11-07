@@ -237,10 +237,6 @@ class Generator:
             overrides.append(f'training.warmup={args.warmup}')
         if args.resume_ckpt is not None:
             overrides.append(f'training.resume_ckpt="{args.resume_ckpt}"')
-        if args.reset_training_state is not None and args.reset_training_state:
-            overrides.append(f'training.reset_training_state=true')
-        elif args.no_reset_training_state is not None and args.no_reset_training_state:
-            overrides.append(f'training.reset_training_state=false')
         if args.exp_name is not None:
             overrides.append(f'training.wandb_exp_name="{args.exp_name}"')
         if args.scheduler_type is not None:
@@ -331,7 +327,7 @@ class Generator:
         if args.gpus is not None:
             slurm['gpu_count'] = args.gpus
             slurm['cpus_per_task'] = args.gpus * 4
-            slurm['mem'] = f'{args.gpus * 20}GB'
+            slurm['mem'] = f'{args.gpus * 40}GB'
         if args.gpu_type is not None:
             slurm['gpu_type'] = args.gpu_type
         
@@ -432,7 +428,7 @@ LATEST_CKPT=$(ls -t {output_dir}/step_*.pt 2>/dev/null | head -n 1)
 if [ -n "$LATEST_CKPT" ]; then
     echo "Found existing checkpoint: $LATEST_CKPT"
     echo "Resuming training from checkpoint..."
-    RUNTIME_OVERRIDES="training.resume_ckpt=\\"$LATEST_CKPT\\" training.reset_training_state=false"
+    RUNTIME_OVERRIDES="training.resume_ckpt=\\"$LATEST_CKPT\\""
 fi
 '''
         
@@ -558,8 +554,6 @@ exit 0
                 
                 # Update args to use the latest checkpoint
                 args.resume_ckpt = latest_ckpt
-                args.reset_training_state = False
-                args.no_reset_training_state = True
                 
                 # Increment seed for the next job (if seed was provided)
                 # If no seed was provided initially, generate one based on timestamp
@@ -755,10 +749,6 @@ def main():
                         help='Warmup steps')
     parser.add_argument('--resume-ckpt', type=str,
                         help='Checkpoint path to resume from')
-    parser.add_argument('--reset-training-state', action='store_true', default=None,
-                        help='Reset training state')
-    parser.add_argument('--no-reset-training-state', action='store_true', default=None,
-                        help='Do not reset training state')
     parser.add_argument('--exp-name', type=str,
                         help='Experiment name')
     parser.add_argument('--amp-dtype', choices=['bf16', 'fp16', 'fp32'],
@@ -853,6 +843,10 @@ def main():
                         help='Interval in seconds to check job status when auto-resubmit is enabled (default: 30)')
     
     args = parser.parse_args()
+
+    if args.auto_resubmit:
+        # TODO: should update -- resume checkpoint logic has been updated in utils/training_utils.py
+        raise ValueError("Auto-resubmit is not supported yet")
     
     # Generate the script
     generator = Generator()

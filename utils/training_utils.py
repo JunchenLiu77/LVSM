@@ -170,23 +170,22 @@ def find_checkpoints(load_path):
 
 
 def auto_resume_job(
-    load_path,
+    checkpoint_dir,
+    resume_ckpt,
     model,
     optimizer,
     lr_scheduler,
-    reset_training_state
 ):
     """
     Resume training from the latest checkpoint in the specified directory.
     Returns the fwdbwd_pass_step and param_update_step.
 
     Args:
-        load_path: If dir, load the last checkpoint in the directory.
-            O.w., assume it's a ckpt and load it.
+        checkpoint_dir: directory to load checkpoints from
+        resume_ckpt: checkpoint to resume from
         model: model to be loaded
         optimizer: optimizer to be loaded
         lr_scheduler: lr scheduler to be loaded
-        reset_training_state: whether to reset the training state
 
     Returns:
         optimizer, lr_scheduler, forward_pass_step, param_update_step
@@ -194,12 +193,21 @@ def auto_resume_job(
     """
     forward_pass_step = 0
     param_update_step = 0
-    all_ckpt_paths = find_checkpoints(load_path)
+    all_ckpt_paths = find_checkpoints(checkpoint_dir)
     if len(all_ckpt_paths) == 0:
-        print_rank0(f"No checkpoint found in {load_path}, we will start from scratch")
-        return optimizer, lr_scheduler, forward_pass_step, param_update_step
-    try:
+        # if there are no checkpoints, we check whether there is a resume_ckpt provided
+        if resume_ckpt is not None:
+            ckpt_path = resume_ckpt
+            checkpoint = torch.load(ckpt_path, map_location="cpu")
+            print_rank0(f"Loaded checkpoint from {ckpt_path}")
+        else:
+            print_rank0(f"No checkpoint found in {checkpoint_dir} and no resume_ckpt provided, we will start from scratch")
+            return optimizer, lr_scheduler, forward_pass_step, param_update_step
+    else:
+        # Use the latest checkpoint
         ckpt_path = all_ckpt_paths[-1]
+    
+    try:
         checkpoint = torch.load(ckpt_path, map_location="cpu")
     except:
         traceback.print_exc()
@@ -215,8 +223,8 @@ def auto_resume_job(
         status = model.load_state_dict(fixed_state_dict, strict=False)
     print_rank0(f"Loaded model from {os.path.abspath(ckpt_path)}, the status is {status}")
 
-    # resume training state
-    if not reset_training_state:
+    # Resume training state only when there are some checkpoints in the checkpoint_dir
+    if len(all_ckpt_paths) > 0:
         try:
             optimizer.load_state_dict(checkpoint["optimizer"])
             lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])

@@ -25,7 +25,6 @@ uv run torchrun \
     training.lr=0.0001 \
     training.warmup=3000 \
     training.resume_ckpt="./ckpts/scene_encoder_decoder_256.pt" \
-    training.reset_training_state=true \
     training.wandb_exp_name="${EXP_NAME}" \
     training.scheduler_type=cosine \
     training.checkpoint_every=500 \

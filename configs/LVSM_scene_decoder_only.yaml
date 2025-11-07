@@ -64,7 +64,6 @@ training:
 
   # resume & checkpoint
   resume_ckpt: ""
-  reset_training_state: false
   checkpoint_dir: ./experiments/checkpoints/LVSM_scene_decoder_only
 
   # amp & dtype
@@ -75,7 +74,7 @@ training:
   # wandb
   api_key_path: ./configs/api_keys.yaml
   wandb_exp_name: LVSM_scene_decoder_only
-  wandb_project: LVSM_r2
+  wandb_project: LVSM_r3
 
   # logging
   print_every: 20

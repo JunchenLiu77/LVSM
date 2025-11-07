@@ -17,6 +17,7 @@ import shutil
 import copy
 from pathlib import Path
 import time
+import json
 
 #################Init Config  Begins#################
 
@@ -220,7 +221,7 @@ def local_backup_src_code(
     
 
 
-def init_wandb_and_backup(config):
+def init_wandb_and_backup(config, resume=False, resume_id=None):
     # API key validation
     assert os.path.exists(
         config.training.api_key_path
@@ -233,11 +234,28 @@ def init_wandb_and_backup(config):
 
     # WandB initialization
     config_copy = copy.deepcopy(config)
-    wandb.init(
-        project=config.training.wandb_project,
-        name=config.training.wandb_exp_name,
-        config=config_copy,
-    )
+    run_id_file = os.path.join(config.training.checkpoint_dir, "wandb_run.json")
+    init_kwargs = {
+        "project": config.training.wandb_project,
+        "name": config.training.wandb_exp_name,
+        "config": config_copy,
+    }
+    # If resume requested but id not provided, try load from file
+    if resume and (resume_id is None) and os.path.exists(run_id_file):
+        try:
+            with open(run_id_file, "r") as f:
+                saved = json.load(f)
+                resume_id = saved.get("id", None)
+        except Exception:
+            resume_id = None
+    # Configure resume behavior
+    if resume_id is not None:
+        init_kwargs["id"] = resume_id
+        init_kwargs["resume"] = "allow"
+    elif resume:
+        # Best-effort resume without known id (will start new run if not resuming)
+        init_kwargs["resume"] = "allow"
+    wandb.init(**init_kwargs)
 
     # Source code backup
     cur_dir = os.path.dirname(os.path.realpath(__file__))
@@ -257,4 +275,16 @@ def init_wandb_and_backup(config):
         include_fn=lambda path: path.endswith(extension_to_backup),
     )
 
+    # Persist run id for future resume
+    try:
+        os.makedirs(config.training.checkpoint_dir, exist_ok=True)
+        meta = {
+            "id": wandb.run.id if wandb.run else None,
+            "name": wandb.run.name if wandb.run else None,
+            "project": config.training.wandb_project,
+        }
+        with open(run_id_file, "w") as f:
+            json.dump(meta, f)
+    except Exception:
+        pass
 
