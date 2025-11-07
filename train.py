@@ -324,9 +324,7 @@ while cur_train_step <= total_train_steps:
                     if 1 not in metrics:
                         metrics[1] = {}
                     metrics[1].update(per_scene_metrics)
-            print(f"[debugging] 1")
             dist.barrier()
-            print(f"[debugging] 2")
             if config.inference.get("compute_metrics", False):
                 if is_ttt:
                     for n_iters in iters:
@@ -357,7 +355,6 @@ while cur_train_step <= total_train_steps:
                             return merged
 
                         metrics = gather_metrics(metrics)
-                        print(f"[debugging] 3")
 
                         # Save combined JSON and CSV averages, then log to wandb
                         test_name = f"test_{real_n_iters}iters"
