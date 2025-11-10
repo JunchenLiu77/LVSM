@@ -223,6 +223,9 @@ dist.barrier()
 start_train_step = cur_train_step
 model.train()
 
+# Record wall-clock start time for elapsed-time logging
+start_wall_time = time.time()
+
 while cur_train_step <= total_train_steps:
     tic = time.time()
     cur_epoch = int(cur_train_step * (total_batch_size / grad_accum_steps) // len(train_set))
@@ -737,7 +740,7 @@ while cur_train_step <= total_train_steps:
             print_str = f"[Epoch {int(cur_epoch):>3d}] | Forwad step: {int(cur_train_step):>6d} (Param update step: {int(cur_param_update_step):>6d})"
             if is_ttt:
                 print_str += f" | ttt_iters: {ttt_metrics['n_iters']}"
-            print_str += f" | Iter Time: {time.time() - tic:.2f}s | LR: {optimizer.param_groups[0]['lr']:.6f}"
+            print_str += f" | Iter Time: {time.time() - tic:.2f}s | Elapsed: {(time.time() - start_wall_time):.1f}s | LR: {optimizer.param_groups[0]['lr']:.6f}"
             # Add loss values
             print_str += "\ninput: "
             for k, v in input_loss_dict.items():
@@ -766,6 +769,7 @@ while cur_train_step <= total_train_steps:
                 "param_update_step": cur_param_update_step,
                 "lr": optimizer.param_groups[0]["lr"],
                 "iter_time": time.time() - tic,
+                "elapsed_time": time.time() - start_wall_time,
                 "grad_norm": total_grad_norm,
                 "epoch": cur_epoch,
             }
