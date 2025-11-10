@@ -311,8 +311,12 @@ class Images2LatentScene(nn.Module):
         )
         
         # encode input views
-        latent_tokens = self.encode(input, ss) # [b, n_latent_vectors, d]
-        # latent_tokens = self.encode(input) # [b, n_latent_vectors, d]
+        if self.config.model.input_4views:
+            # if input_4views, encode both input and ss views through encoder
+            latent_tokens = self.encode(input, ss) # [b, n_latent_vectors, d]
+        else:
+            # otherwise, only ss views are encoded, other views are all viewed as target views
+            latent_tokens = self.encode(ss) # [b, n_latent_vectors, d]
         
         # decode input and target views
         rendered_input = self.decode(input, latent_tokens)
