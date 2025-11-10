@@ -229,12 +229,16 @@ class Dataset(Dataset):
         scene_path = str(self.all_scene_paths[idx], encoding="utf-8").strip()
         json_file_path = os.path.join(scene_path, "scene_info.json")
         
-        if self.is_zip:
-            zf = self._get_zip_file()
-            with zf.open(json_file_path) as f:
-                data_json = json.load(f)
-        else:
-            data_json = json.load(open(json_file_path, 'r'))
+        try:
+            if self.is_zip:
+                zf = self._get_zip_file()
+                with zf.open(json_file_path) as f:
+                    data_json = json.load(f)
+            else:
+                data_json = json.load(open(json_file_path, 'r'))
+        except Exception as e:
+            # zip file IO error is triggered, read the next scene
+            return self.__getitem__(random.randint(0, len(self) - 1))
         
         frames = data_json["frames"]
         scene_name = data_json["scene_name"]
