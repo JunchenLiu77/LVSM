@@ -3,6 +3,7 @@
 import torch
 import torch.nn as nn
 from einops import rearrange
+import math
 
 try:
     import xformers.ops as xops
@@ -173,6 +174,9 @@ class QK_Norm_SelfAttention(nn.Module):
             attn_bias=attn_bias,
             p=self.attn_dropout if self.training else 0.0,
             op=(xops.fmha.flash.FwOp, xops.fmha.flash.BwOp),
+            # apply a temperature factor to attention scores
+            # scale=(self.head_dim ** -0.5) * (math.log(7168) / math.log(5120)) ** 0.5,
+            # scale=(self.head_dim ** -0.5) * max(1.0, (math.log(7168) / math.log(5120))),
         )
         
         x = rearrange(x, "b l nh dh -> b l (nh dh)")

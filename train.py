@@ -307,10 +307,12 @@ while cur_train_step <= total_train_steps:
                                 metrics[real_n_iters] = {}
                             metrics[real_n_iters].update(per_scene_metrics)
                 else:
-                    input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
+                    input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss = model(
                         batch,
                         num_input_views=config.training.num_input_views,
                         num_target_views=3,
+                        num_ss_views=config.training.num_ss_views,
+                        num_ood_target_views=config.training.num_ood_target_views,
                         has_target_image=True,
                         training=False,
                     )
@@ -319,11 +321,12 @@ while cur_train_step <= total_train_steps:
                         rendered_input, rendered_target, rendered_ss, rendered_ood_target,
                         out_dir,
                         compute_metrics=config.inference.get("compute_metrics"),
+                        n_iters=0,
                     )
                     # ugly but necessary, since the metrics is a nested dict
-                    if 1 not in metrics:
-                        metrics[1] = {}
-                    metrics[1].update(per_scene_metrics)
+                    if 0 not in metrics:
+                        metrics[0] = {}
+                    metrics[0].update(per_scene_metrics)
             dist.barrier()
             if config.inference.get("compute_metrics", False):
                 if is_ttt:
@@ -452,8 +455,119 @@ while cur_train_step <= total_train_steps:
                                 }, step=cur_train_step)
 
                 else:
-                    raise NotImplementedError("TTT without G3R supervision is not supported yet")
-                    # input_psnr, input_lpips, input_ssim, target_psnr, target_lpips, target_ssim, ss_psnr, ss_lpips, ss_ssim, ood_target_psnr, ood_target_lpips, ood_target_ssim = summarize_evaluation(out_dir)
+                    # Non-TTT: gather metrics across ranks, save JSON/CSV, and log to wandb
+                    def gather_metrics(local_metrics):
+                        """
+                        Gather nested metrics dicts from all ranks and merge by n_iters -> uid.
+                        Structure: {n_iters: {uid: metrics_dict}}
+                        """
+                        gathered = [None for _ in range(ddp_info.world_size)]
+                        dist.all_gather_object(gathered, local_metrics)
+                        merged = {}
+                        for part in gathered:
+                            if not part:
+                                continue
+                            for k_iters, by_uid in part.items():
+                                if k_iters not in merged:
+                                    merged[k_iters] = {}
+                                merged[k_iters].update(by_uid)
+                        return merged
+
+                    real_n_iters = 0
+                    metrics = gather_metrics(metrics)
+
+                    test_name = f"test_{real_n_iters}iters"
+                    if ddp_info.is_main_process:
+                        # Persist merged per-scene metrics JSON (sorted by uid)
+                        all_scenes = metrics.get(real_n_iters, {})
+                        json_path = os.path.join(out_dir, f"{real_n_iters}iters_metrics.json")
+                        try:
+                            sorted_items = sorted(all_scenes.items(), key=lambda kv: int(kv[0]) if not isinstance(kv[0], int) else kv[0])
+                            ordered = {f"{int(uid):06d}": data for uid, data in sorted_items}
+                            with open(json_path, "w") as f:
+                                json.dump(ordered, f, indent=2)
+                        except Exception:
+                            pass
+
+                        # Compute averages
+                        metric_keys = [
+                            "input_psnr", "input_lpips", "input_ssim",
+                            "target_psnr", "target_lpips", "target_ssim",
+                            "ss_psnr", "ss_lpips", "ss_ssim",
+                            "ood_target_psnr", "ood_target_lpips", "ood_target_ssim",
+                        ]
+                        summaries = [scene_metrics["summary"] for scene_metrics in all_scenes.values()]
+                        averages = {k: 0.0 for k in metric_keys}
+                        if len(summaries) > 0:
+                            for k in metric_keys:
+                                averages[k] = sum(s[k] for s in summaries) / len(summaries)
+                        else:
+                            pass
+
+                        # Write CSV with per-scene summaries and averages (sorted by uid, .4f precision)
+                        csv_path = os.path.join(out_dir, f"{real_n_iters}iters_summary.csv")
+                        try:
+                            with open(csv_path, "w", newline="") as f:
+                                writer = csv.writer(f)
+                                # header
+                                writer.writerow(["Index"] + metric_keys)
+                                # rows per scene
+                                for uid, scene in sorted(all_scenes.items(), key=lambda kv: int(kv[0]) if not isinstance(kv[0], int) else kv[0]):
+                                    summary = scene.get("summary", {})
+                                    row = [f"{int(uid):06d}"] + [f"{summary.get(k, 0.0):.4f}" for k in metric_keys]
+                                    writer.writerow(row)
+                                # blank line and averages
+                                writer.writerow([])
+                                avg_row = ["average"] + [f"{averages[k]:.4f}" for k in metric_keys]
+                                writer.writerow(avg_row)
+                        except Exception:
+                            pass
+
+                        # Map averages to names expected in wandb logging below
+                        input_psnr = averages["input_psnr"]
+                        input_lpips = averages["input_lpips"]
+                        input_ssim = averages["input_ssim"]
+                        target_psnr = averages["target_psnr"]
+                        target_lpips = averages["target_lpips"]
+                        target_ssim = averages["target_ssim"]
+                        ss_psnr = averages["ss_psnr"]
+                        ss_lpips = averages["ss_lpips"]
+                        ss_ssim = averages["ss_ssim"]
+                        ood_target_psnr = averages["ood_target_psnr"]
+                        ood_target_lpips = averages["ood_target_lpips"]
+                        ood_target_ssim = averages["ood_target_ssim"]
+                        wandb.log({
+                            f"{test_name}/input_psnr": input_psnr,
+                            f"{test_name}/input_lpips": input_lpips,
+                            f"{test_name}/input_ssim": input_ssim,
+                            f"{test_name}/target_psnr": target_psnr,
+                            f"{test_name}/target_lpips": target_lpips,
+                            f"{test_name}/target_ssim": target_ssim,
+                            f"{test_name}/ss_psnr": ss_psnr,
+                            f"{test_name}/ss_lpips": ss_lpips,
+                            f"{test_name}/ss_ssim": ss_ssim,
+                            f"{test_name}/ood_target_psnr": ood_target_psnr,
+                            f"{test_name}/ood_target_lpips": ood_target_lpips,
+                            f"{test_name}/ood_target_ssim": ood_target_ssim,
+                        }, step=cur_train_step)
+
+                    # log scene images to wandb, only uid 162 and 183 scenes are logged
+                    if ddp_info.is_main_process:
+                        for uid in [162, 183]:
+                            sample_dir = os.path.join(out_dir, f"{uid:06d}")
+                            if not os.path.exists(sample_dir):
+                                continue
+                            prefix = f"{real_n_iters}iters_"
+                            input_img = Image.open(os.path.join(sample_dir, f"{prefix}input.png"))
+                            target_img = Image.open(os.path.join(sample_dir, f"{prefix}target.png"))
+                            ss_img = Image.open(os.path.join(sample_dir, f"{prefix}ss.png"))
+                            ood_target_img = Image.open(os.path.join(sample_dir, f"{prefix}ood_target.png"))
+                            wandb.log({
+                                f"{test_name}/uid_{uid}/input": wandb.Image(input_img),
+                                f"{test_name}/uid_{uid}/target": wandb.Image(target_img),
+                                f"{test_name}/uid_{uid}/ss": wandb.Image(ss_img),
+                                f"{test_name}/uid_{uid}/ood_target": wandb.Image(ood_target_img),
+                            }, step=cur_train_step)
 
     try:
         data = next(train_loader_iter)
@@ -523,7 +637,7 @@ while cur_train_step <= total_train_steps:
             elif is_ttt:
                 raise NotImplementedError("TTT without G3R supervision is not supported yet")
             else:
-                input, target, input_loss_metrics, target_loss_metrics, distillation_loss, rendered_input, rendered_target, loss, ttt_metrics = model(
+                input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss = model(
                     batch,
                     num_input_views=config.training.num_input_views,
                     num_target_views=config.training.num_target_views,
@@ -706,7 +820,7 @@ while cur_train_step <= total_train_steps:
             )
 
         # save checkpoint
-        if (cur_train_step % config.training.checkpoint_every == 0) or (cur_train_step == total_train_steps):
+        if (cur_train_step % config.training.checkpoint_every == 0) or (cur_train_step == total_train_steps) or (cur_train_step == total_train_steps // 2):
             if isinstance(model, DDP):
                 model_weights = model.module.state_dict()
             else:
@@ -723,13 +837,15 @@ while cur_train_step <= total_train_steps:
             torch.save(checkpoint, ckpt_path)
             print(f"Saved checkpoint at step {cur_train_step} to {os.path.abspath(ckpt_path)}")
 
-            # if current ckpt folder has more than 4 checkpoints, delete the oldest one
+            # if current ckpt folder has more than 4 checkpoints, delete the oldest one, but always keep the half-process checkpoint.
             if len(os.listdir(config.training.checkpoint_dir)) > config.training.get('max_checkpoints', 4):
                 ckpts = sorted(
                     [f for f in os.listdir(config.training.checkpoint_dir) if f.endswith(".pt")],
                     key=lambda x: int(x.split("_")[1].split(".")[0]),
                 )
                 for ckpt in ckpts[:-config.training.get('max_checkpoints', 4)]:
+                    if ckpt == f"ckpt_{total_train_steps // 2:016}.pt":
+                        continue
                     os.remove(os.path.join(config.training.checkpoint_dir, ckpt))
 
         # export intermediate visualization results
@@ -740,7 +856,9 @@ while cur_train_step <= total_train_steps:
         #     model.train()
     
     # delete all tensors
-    del batch, input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss, ttt_metrics
+    del batch, input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss
+    if is_ttt:
+        del ttt_metrics
     if is_ttt and config.model.ttt.supervise_mode == "g3r":
         del s, ss_pose_tokens, target_pose_tokens, ood_target_pose_tokens
     if ddp_info.is_main_process:

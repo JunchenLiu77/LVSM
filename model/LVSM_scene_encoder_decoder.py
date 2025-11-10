@@ -218,16 +218,24 @@ class Images2LatentScene(nn.Module):
             return torch.cat([images * 2.0 - 1.0, pose_cond], dim=2)
 
 
-    def encode(self, input):
+    def encode(self, input, ss=None):
         """
         Encode the light_field_latent into latent_tokens with input posed images.
         """
         checkpoint_every = self.config.training.grad_checkpoint_every
         n_latent_vectors = self.config.model.transformer.n_latent_vectors
+
+        images = input.image
+        ray_o = input.ray_o
+        ray_d = input.ray_d
+        if ss is not None:
+            images = torch.cat([images, ss.image], dim=1)
+            ray_o = torch.cat([ray_o, ss.ray_o], dim=1)
+            ray_d = torch.cat([ray_d, ss.ray_d], dim=1)
         
         # Process input images
         posed_input_images = self.get_posed_input(
-            images=input.image, ray_o=input.ray_o, ray_d=input.ray_d
+            images=images, ray_o=ray_o, ray_d=ray_d
         )
         b, v_input, c, h, w = posed_input_images.size()
 
@@ -281,29 +289,50 @@ class Images2LatentScene(nn.Module):
         return rendered_target
 
 
-    def forward(self, data_batch, num_input_views, num_target_views, has_target_image=True, training=False):
-        input, target = self.process_data(data_batch, num_input_views=num_input_views, num_target_views=num_target_views, has_target_image=has_target_image, training=training, compute_rays=True)
+    def forward(
+        self,
+        data_batch, 
+        num_input_views, 
+        num_target_views, 
+        num_ss_views, 
+        num_ood_target_views,
+        has_target_image=True,
+        training=False,
+    ):
+        input, target, ss, ood_target = self.process_data(
+            data_batch, 
+            num_input_views=num_input_views, 
+            num_target_views=num_target_views, 
+            num_ss_views=num_ss_views, 
+            num_ood_target_views=num_ood_target_views, 
+            has_target_image=has_target_image, 
+            training=training, 
+            compute_rays=True
+        )
         
         # encode input views
-        latent_tokens = self.encode(input) # [b, n_latent_vectors, d]
+        latent_tokens = self.encode(input, ss) # [b, n_latent_vectors, d]
+        # latent_tokens = self.encode(input) # [b, n_latent_vectors, d]
         
         # decode input and target views
         rendered_input = self.decode(input, latent_tokens)
         rendered_target = self.decode(target, latent_tokens)
+        rendered_ss = self.decode(ss, latent_tokens)
+        rendered_ood_target = self.decode(ood_target, latent_tokens)
 
         if has_target_image:
             target_loss_metrics = self.loss_computer(rendered_target, target.image)
             input_loss_metrics = self.loss_computer(rendered_input, input.image)
+            ss_loss_metrics = self.loss_computer(rendered_ss, ss.image)
+            ood_target_loss_metrics = self.loss_computer(rendered_ood_target, ood_target.image)
         else:
             target_loss_metrics = None
             input_loss_metrics = None
+            ss_loss_metrics = None
+            ood_target_loss_metrics = None
 
-        if self.config.training.supervision == "input":
-            loss = input_loss_metrics["loss"]
-        elif self.config.training.supervision == "target":
-            loss = target_loss_metrics["loss"]
-
-        return input, target, input_loss_metrics, target_loss_metrics, None, rendered_input, rendered_target, loss, None
+        loss = target_loss_metrics["loss"] + ood_target_loss_metrics["loss"]
+        return input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss
 
 
     @torch.no_grad()
