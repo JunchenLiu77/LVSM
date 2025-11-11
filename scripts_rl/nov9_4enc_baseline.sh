@@ -1,5 +1,10 @@
 # run this script with 4 gpus
+
+# default to 4 gpus
 BATCH_SIZE_PER_GPU=$1
+if [ -z "$BATCH_SIZE_PER_GPU" ]; then
+    BATCH_SIZE_PER_GPU=4
+fi
 
 export EXP_NAME="nov9_4enc_baseline"
 export MASTER_ADDR=localhost
