@@ -1,4 +1,6 @@
 # run this script with 4 gpus
+BATCH_SIZE_PER_GPU=$1
+
 export EXP_NAME="nov9_2enc_baseline"
 export MASTER_ADDR=localhost
 export MASTER_PORT=$(python3 -c "import socket as s; x=s.socket(s.AF_INET,s.SOCK_STREAM); x.bind(('',0)); print(x.getsockname()[1]); x.close()")
@@ -15,7 +17,7 @@ torchrun \
     model.transformer.encoder_n_layer=6 \
     model.transformer.decoder_n_layer=6 \
     model.input_4views=false \
-    training.batch_size_per_gpu=4 \
+    training.batch_size_per_gpu=${BATCH_SIZE_PER_GPU} \
     training.grad_checkpoint=false \
     training.seed=777 \
     training.train_steps=100000 \
@@ -23,6 +25,8 @@ torchrun \
     training.lr=0.0001 \
     training.wandb_exp_name="${EXP_NAME}" \
     training.checkpoint_every=500 \
+    training.scheduler_type=cosine \
+    training.warmup=3000 \
     inference.if_inference=false \
     inference.first_n_batches=5 \
     training.num_input_views=2 \

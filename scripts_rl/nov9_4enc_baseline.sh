@@ -29,6 +29,8 @@ torchrun \
     training.lr=0.0001 \
     training.wandb_exp_name="${EXP_NAME}" \
     training.checkpoint_every=500 \
+    training.scheduler_type=cosine \
+    training.warmup=3000 \
     inference.if_inference=false \
     inference.first_n_batches=5 \
     training.num_input_views=2 \
