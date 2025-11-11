@@ -848,7 +848,8 @@ while cur_train_step <= total_train_steps:
                     key=lambda x: int(x.split("_")[1].split(".")[0]),
                 )
                 for ckpt in ckpts[:-config.training.get('max_checkpoints', 4)]:
-                    if ckpt == f"ckpt_{total_train_steps // 2:016}.pt":
+                    # Skip deleting the half-process checkpoint, and skip deleting all "10k" checkpoints (e.g., 10000, 20000, etc.)
+                    if ckpt == f"ckpt_{total_train_steps // 2:016}.pt" or int(ckpt.split("_")[1].split(".")[0]) % 10000 == 0:
                         continue
                     os.remove(os.path.join(config.training.checkpoint_dir, ckpt))
 

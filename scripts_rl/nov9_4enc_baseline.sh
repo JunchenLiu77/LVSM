@@ -31,4 +31,5 @@ torchrun \
     training.num_ss_views=2 \
     training.num_ood_target_views=2 \
     training.test_every=100 \
-    training.test_batch_size_per_gpu=5
+    training.test_batch_size_per_gpu=5 \
+    training.grad_clip_norm=2.0  # grad norm is larger than 2 views model, which needs larger clip norm
