@@ -217,6 +217,10 @@ class Generator:
                 overrides.append('model.ttt.progressive=false')
             if args.ttt_warmup_steps is not None:
                 overrides.append(f'model.ttt.warmup_steps={args.ttt_warmup_steps}')
+            if args.ss_4views is not None and args.ss_4views:
+                overrides.append('model.ttt.ss_4views=true')
+            elif args.no_ss_4views is not None and args.no_ss_4views:
+                overrides.append('model.ttt.ss_4views=false')
         
         # Training configuration overrides
         if args.batch_size is not None:
@@ -729,6 +733,10 @@ def main():
                         help='Distillation factor (encoder-decoder-ttt)')
     parser.add_argument('--enable-unroll', action='store_true', default=None,
                         help='Enable unroll in TTT (encoder-decoder-ttt)')
+    parser.add_argument('--ss-4views', action='store_true', default=None,
+                        help='Use 4 views for ss loss calculation (encoder-decoder-ttt)')
+    parser.add_argument('--no-ss-4views', action='store_true', default=None,
+                        help='Do not use 4 views for ss loss calculation (encoder-decoder-ttt)')
     
     # Training configuration
     parser.add_argument('--batch-size', type=int,

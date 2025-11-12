@@ -765,7 +765,9 @@ class Images2LatentScene(nn.Module):
         target_pose_tokens=None, 
         ood_target_pose_tokens=None, 
         is_last=False,
-        training=True
+        training=True,
+        input_views_ss=False,
+        ood_target_views_ss=False,
     ):
         """
         Forward the latent tokens with the TTT blocks for G3R supervision. Returns the updated state and TTT metrics for logging.
@@ -784,6 +786,8 @@ class Images2LatentScene(nn.Module):
             target_pose_tokens: (Optional) Cached pose tokens for target views
             is_last: Whether to update the state
             training: gradient checkpointing will always be disabled during inference
+            input_views_ss: Whether to use input views to calculate ss loss
+            ood_target_views_ss: Whether to use ood target views to calculate ss loss
         Returns:
             input_loss_metrics: Input loss metrics, only calculated on the last iteration
             target_loss_metrics: Target loss metrics, calculated on the updated state
@@ -811,11 +815,25 @@ class Images2LatentScene(nn.Module):
         
         s = s.detach().requires_grad_(True)
 
-        # Compute self-supervision losses which is calculated on the input views.
+        # Compute self-supervision losses which is calculated on the ss views
+        ss_loss = 0.0
         with torch.enable_grad():
             # calculate ss loss
             rendered_ss, ss_pose_tokens = self.decode(ss, s, target_pose_tokens=ss_pose_tokens, training=training)
             ss_loss_metrics = self.loss_computer(rendered_ss, ss.image)
+            ss_loss += ss_loss_metrics["loss"]
+
+            if input_views_ss:
+                # calculate input views ss loss
+                rendered_input, _ = self.decode(input, s, training=training)
+                input_views_ss_loss_metrics = self.loss_computer(rendered_input, input.image)
+                ss_loss += input_views_ss_loss_metrics["loss"]
+            
+            if ood_target_views_ss:
+                # calculate ood target views ss loss
+                rendered_ood_target, ood_target_pose_tokens = self.decode(ood_target, s, target_pose_tokens=ood_target_pose_tokens, training=training)
+                ood_target_views_ss_loss_metrics = self.loss_computer(rendered_ood_target, ood_target.image)
+                ss_loss += ood_target_views_ss_loss_metrics["loss"]
         
         # Update state with self-supervision losses except for the last layer
         grad_norm = self.ttt_grad_normalizers[layer_idx]
@@ -826,11 +844,13 @@ class Images2LatentScene(nn.Module):
             lrnet = self.ttt_lrnet[layer_idx]
 
         new_s, grad_s, layer_metrics = self._update_state_with_loss(
-            s, s, grad_norm, state_norm, opt, ss_loss_metrics["loss"], lrnet,
+            s, s, grad_norm, state_norm, opt, ss_loss, lrnet,
             need_grad=True, t=t
         )
 
         if self.config.model.ttt.enable_unroll:
+            if input_views_ss or ood_target_views_ss:
+                raise NotImplementedError("Unroll with input views ss or ood target views ss is not supported yet")
             # compute the ss loss again with the new state, we dont need gradient this time
             with torch.no_grad():
                 rendered_ss, _ = self.decode(

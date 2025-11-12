@@ -63,7 +63,7 @@ training:
   weight_decay: 0.05
   beta1: 0.9
   beta2: 0.95
-  scheduler_type: constant
+  scheduler_type: cosine
   
   # resume & checkpoint
   resume_ckpt: ""
