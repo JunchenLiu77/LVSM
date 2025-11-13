@@ -221,6 +221,16 @@ class Generator:
                 overrides.append('model.ttt.ss_4views=true')
             elif args.no_ss_4views is not None and args.no_ss_4views:
                 overrides.append('model.ttt.ss_4views=false')
+            if args.corrupt_training_images is not None and args.corrupt_training_images:
+                overrides.append('model.ttt.corrupt_training_images=true')
+            elif args.no_corrupt_training_images is not None and args.no_corrupt_training_images:
+                overrides.append('model.ttt.corrupt_training_images=false')
+            if args.corrupt_training_states is not None and args.corrupt_training_states:
+                overrides.append('model.ttt.corrupt_training_states=true')
+            elif args.no_corrupt_training_states is not None and args.no_corrupt_training_states:
+                overrides.append('model.ttt.corrupt_training_states=false')
+            if args.corrupt_max_t is not None:
+                overrides.append(f'model.ttt.corrupt_max_t={args.corrupt_max_t}')
         
         # Training configuration overrides
         if args.batch_size is not None:
@@ -737,6 +747,16 @@ def main():
                         help='Use 4 views for ss loss calculation (encoder-decoder-ttt)')
     parser.add_argument('--no-ss-4views', action='store_true', default=None,
                         help='Do not use 4 views for ss loss calculation (encoder-decoder-ttt)')
+    parser.add_argument('--corrupt-training-images', action='store_true', default=None,
+                        help='Corrupt training images for ss loss calculation (encoder-decoder-ttt)')
+    parser.add_argument('--no-corrupt-training-images', action='store_true', default=None,
+                        help='Do not corrupt training images for ss loss calculation (encoder-decoder-ttt)')
+    parser.add_argument('--corrupt-training-states', action='store_true', default=None,
+                        help='Corrupt training states for ss loss calculation (encoder-decoder-ttt)')
+    parser.add_argument('--no-corrupt-training-states', action='store_true', default=None,
+                        help='Do not corrupt training states for ss loss calculation (encoder-decoder-ttt)')
+    parser.add_argument('--corrupt-max-t', type=float,
+                        help='Maximum t for corrupt training images and states (encoder-decoder-ttt)')
     
     # Training configuration
     parser.add_argument('--batch-size', type=int,

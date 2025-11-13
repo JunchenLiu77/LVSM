@@ -50,6 +50,9 @@ model:
     progressive: false
     warmup_steps: 5000 # progressively train the model with more iterations
     ss_4views: true
+    corrupt_training_images: false
+    corrupt_training_states: false
+    corrupt_max_t: 1.0
     adam:
       lr: 1e-3
       beta1: 0.9

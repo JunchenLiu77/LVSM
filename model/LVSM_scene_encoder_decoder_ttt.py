@@ -468,6 +468,53 @@ class Images2LatentScene(nn.Module):
             return torch.cat([images * 2.0 - 1.0, pose_cond], dim=2)
 
 
+    def _maybe_corrupt_images_for_ss(self, images, training=True):
+        """
+        Optionally corrupt images via diffusion-style interpolation with Gaussian noise for SS loss augmentation.
+        
+        Controlled by config keys in ttt.yaml:
+          - model.ttt.corrupt_training_images: bool (default False)
+        
+        Formula (per (b, v) sample):
+          x_t = sqrt(1 - t) * image + sqrt(t) * eps,  t ~ Uniform(0, 1),  eps ~ N(0, I)
+        """
+        b, v = images.shape[:2]
+        device = images.device
+        # Sample a scalar t per (b, v) and broadcast to pixels/channels
+        t = torch.rand((b, v, 1, 1, 1), device=device) * self.config.model.ttt.corrupt_max_t  # Uniform(0, corrupt_max_t)
+        # Normalize to [-1, 1], apply diffusion-style noise, then map back to [0, 1]
+        x = images * 2.0 - 1.0
+        eps = torch.randn_like(x)
+        x_t = torch.sqrt(1.0 - t) * x + torch.sqrt(t) * eps
+        images_noisy = (x_t + 1.0) * 0.5
+        return images_noisy.clamp(0.0, 1.0)
+
+
+    def _maybe_corrupt_state(self, s):
+        """
+        Optionally corrupt the latent state 's' during training.
+        We normalize 's' to unit variance, apply diffusion-style mixing with Gaussian noise,
+        then map back using the original statistics.
+        
+        Controlled by:
+          - model.ttt.corrupt_training_state: bool (default False)
+        """
+        # Compute per-sample statistics over the last dimension
+        s_mean = s.mean(dim=(-1), keepdim=True)
+        s_std = s.std(dim=(-1), keepdim=True) + 1e-10
+        s_norm = (s - s_mean) / s_std
+        
+        # Sample a scalar t per batch item to control the corruption strength
+        b = s.shape[0]
+        device = s.device
+        t = torch.rand((b, 1, 1), device=device) * self.config.model.ttt.corrupt_max_t  # Uniform(0, corrupt_max_t)
+        eps = torch.randn_like(s_norm)
+        s_t = torch.sqrt(1.0 - t) * s_norm + torch.sqrt(t) * eps
+        
+        # Map back to the original domain
+        return s_t * s_std + s_mean
+
+
     def encode(self, input, training=True):
         """
         Encode the light_field_latent into latent_tokens with input posed images.
@@ -811,8 +858,15 @@ class Images2LatentScene(nn.Module):
         if s is None:
             assert layer_idx == 0 and iter_idx == 0, "layer_idx and iter_idx must be 0 for G3R supervision when s is not provided"
             # use encoder to absorb input views
-            s = self.encode(input, training=training)
+            if training and self.config.model.ttt.corrupt_training_images:
+                enc_input = copy.deepcopy(input)
+                enc_input.image = self._maybe_corrupt_images_for_ss(input.image)
+            else:
+                enc_input = input
+            s = self.encode(enc_input, training=training)
         
+        if training and self.config.model.ttt.corrupt_training_states:
+            s = self._maybe_corrupt_state(s)
         s = s.detach().requires_grad_(True)
 
         # Compute self-supervision losses which is calculated on the ss views
