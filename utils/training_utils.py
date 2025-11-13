@@ -175,6 +175,7 @@ def auto_resume_job(
     model,
     optimizer,
     lr_scheduler,
+    reset_training_state=True,
 ):
     """
     Resume training from the latest checkpoint in the specified directory.
@@ -224,7 +225,7 @@ def auto_resume_job(
     print_rank0(f"Loaded model from {os.path.abspath(ckpt_path)}, the status is {status}")
 
     # Resume training state only when there are some checkpoints in the checkpoint_dir
-    if len(all_ckpt_paths) > 0:
+    if len(all_ckpt_paths) > 0 or not reset_training_state:
         try:
             optimizer.load_state_dict(checkpoint["optimizer"])
             lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])

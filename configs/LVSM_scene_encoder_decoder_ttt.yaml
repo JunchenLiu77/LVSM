@@ -110,6 +110,7 @@ training:
   
   # resume & checkpoint
   resume_ckpt: ""
+  reset_training_state: true
   checkpoint_dir: ./experiments/checkpoints/LVSM_scene_encoder_decoder_ttt
 
   # amp & dtype

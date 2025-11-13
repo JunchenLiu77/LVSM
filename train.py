@@ -187,6 +187,7 @@ if all_ckpt_paths or (config.training.get("resume_ckpt", "") != ""):
         model,
         optimizer,
         lr_scheduler,
+        config.training.get("reset_training_state", True),
     )
 cur_epoch = int(cur_train_step * (total_batch_size / grad_accum_steps) // len(train_set))
 train_sampler.set_epoch(cur_epoch)
