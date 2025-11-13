@@ -515,16 +515,24 @@ class Images2LatentScene(nn.Module):
         return s_t * s_std + s_mean
 
 
-    def encode(self, input, training=True):
+    def encode(self, input, ss=None, training=True):
         """
         Encode the light_field_latent into latent_tokens with input posed images.
         """
         checkpoint_every = self.config.training.grad_checkpoint_every
         n_latent_vectors = self.config.model.transformer.n_latent_vectors
         
+        images = input.image
+        ray_o = input.ray_o
+        ray_d = input.ray_d
+        if ss is not None:
+            images = torch.cat([images, ss.image], dim=1)
+            ray_o = torch.cat([ray_o, ss.ray_o], dim=1)
+            ray_d = torch.cat([ray_d, ss.ray_d], dim=1)
+        
         # Process input images
         posed_input_images = self.get_posed_input(
-            images=input.image, ray_o=input.ray_o, ray_d=input.ray_d
+            images=images, ray_o=ray_o, ray_d=ray_d
         )
         b, v_input, c, h, w = posed_input_images.size()
 
@@ -863,7 +871,11 @@ class Images2LatentScene(nn.Module):
                 enc_input.image = self._maybe_corrupt_images_for_ss(input.image)
             else:
                 enc_input = input
-            s = self.encode(enc_input, training=training)
+            if self.config.model.input_4views:
+                print(f"Using 4 input views for encoding")
+                s = self.encode(enc_input, ss, training=training)
+            else:
+                s = self.encode(enc_input, training=training)
         
         if training and self.config.model.ttt.corrupt_training_states:
             s = self._maybe_corrupt_state(s)

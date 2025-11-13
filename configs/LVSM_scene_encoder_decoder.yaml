@@ -19,7 +19,7 @@ model:
     depth_init: true
     use_qk_norm: true
     n_latent_vectors: 3072 # 3x32x32
-  input_4views: true
+  input_4views: false
 
 training:
   # general

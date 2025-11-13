@@ -19,6 +19,7 @@ model:
     depth_init: true
     use_qk_norm: true
     n_latent_vectors: 3072 # 3x32x32
+  input_4views: false
   ttt:
     n_layer: 1
     n_iters_per_layer: 12

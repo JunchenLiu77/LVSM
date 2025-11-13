@@ -114,6 +114,11 @@ class Generator:
         
         if args.d_model is not None:
             overrides.append(f'model.transformer.d={args.d_model}')
+
+        if args.input_4views is not None and args.input_4views:
+            overrides.append('model.input_4views=true')
+        elif args.no_input_4views is not None and args.no_input_4views:
+            overrides.append('model.input_4views=false')
         
         # Handle n_layer for different architectures
         if args.model == 'decoder-only':
@@ -647,6 +652,10 @@ def main():
                         help='Number of encoder layers (encoder-decoder)')
     parser.add_argument('--decoder-layers', type=int,
                         help='Number of decoder layers (encoder-decoder)')
+    parser.add_argument('--input-4views', action='store_true', default=None,
+                        help='Use 4 input views (encoder-decoder)')
+    parser.add_argument('--no-input-4views', action='store_true', default=None,
+                        help='Do not use 4 input views (encoder-decoder)')
     parser.add_argument('--n-latent', type=int,
                         help='Number of latent vectors (encoder-decoder)')
     parser.add_argument('--ttt-layers', type=int,
