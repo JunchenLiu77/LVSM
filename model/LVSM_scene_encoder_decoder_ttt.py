@@ -872,14 +872,13 @@ class Images2LatentScene(nn.Module):
             else:
                 enc_input = input
             if self.config.model.input_4views:
-                print(f"Using 4 input views for encoding")
                 s = self.encode(enc_input, ss, training=training)
             else:
                 s = self.encode(enc_input, training=training)
         
         if training and self.config.model.ttt.corrupt_training_states:
             s = self._maybe_corrupt_state(s)
-        s = s.detach().requires_grad_(True)
+        s = s.requires_grad_(True)
 
         # Compute self-supervision losses which is calculated on the ss views
         ss_loss = 0.0

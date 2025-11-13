@@ -719,6 +719,34 @@ while cur_train_step <= total_train_steps:
                         if p.requires_grad and (p.grad is not None):
                             p.grad.nan_to_num_(nan=0.0, posinf=1e-6, neginf=-1e-6)
             
+                # Debug: show gradient norms for key modules to verify updates
+                # try:
+                #     if ddp_info.local_rank == 0:
+                #         mdl = model.module if hasattr(model, "module") else model
+                #         def module_grad_norm(mod):
+                #             sq = 0.0
+                #             found = False
+                #             for p in mod.parameters():
+                #                 if p.grad is not None:
+                #                     g = p.grad.detach()
+                #                     sq += float(torch.sum(g * g).item())
+                #                     found = True
+                #             return (sq ** 0.5) if found else 0.0
+                #         # latent grad norm
+                #         if hasattr(mdl, "n_light_field_latent") and isinstance(mdl.n_light_field_latent, torch.nn.Parameter):
+                #             latent_gnorm = mdl.n_light_field_latent.grad.detach().norm().item() if mdl.n_light_field_latent.grad is not None else 0.0
+                #         else:
+                #             latent_gnorm = 0.0
+                #         # image tokenizer grad norm
+                #         img_tok_gnorm = module_grad_norm(mdl.image_tokenizer) if hasattr(mdl, "image_tokenizer") else 0.0
+                #         # encoder grad norm
+                #         enc_gnorm = module_grad_norm(mdl.transformer_encoder) if hasattr(mdl, "transformer_encoder") else 0.0
+                #         # decoder grad norm
+                #         dec_gnorm = module_grad_norm(mdl.transformer_decoder) if hasattr(mdl, "transformer_decoder") else 0.0
+                #         print(f"[step {cur_train_step} iter {idx}] grad_norms: latent={latent_gnorm:.6e}, img_tokenizer={img_tok_gnorm:.6e}, encoder={enc_gnorm:.6e}, decoder={dec_gnorm:.6e}")
+                # except Exception:
+                #     pass
+
                 # visualize the grad norm of each layer of our transformer (FOR DEBUG)
                 if ddp_info.is_main_process and config.training.get("log_grad_norm_details", False):
                     grad_norms = {}  # Dictionary to store norms per layer
