@@ -21,6 +21,7 @@ torchrun \
     training.checkpoint_dir="results/${EXP_NAME}" \
     model.transformer.encoder_n_layer=6 \
     model.transformer.decoder_n_layer=6 \
+    model.input_4views=true \
     training.batch_size_per_gpu=${BATCH_SIZE_PER_GPU} \
     training.grad_checkpoint=false \
     training.seed=777 \
