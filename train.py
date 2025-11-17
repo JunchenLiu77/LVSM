@@ -43,8 +43,10 @@ if len(all_ckpt_paths) > 0:
     ckpt_path = all_ckpt_paths[-1]
     checkpoint = torch.load(ckpt_path, map_location="cpu")
     train_step = checkpoint["fwdbwd_pass_step"]
-    seed = seed + train_step
-    print(f"use seed {seed}")
+else:
+    train_step = 0
+seed = seed + train_step
+print_rank0(f"use seed {seed}")
 
 # Set up DDP for training/inference and Fix random seed
 ddp_info = init_distributed(seed=seed)
