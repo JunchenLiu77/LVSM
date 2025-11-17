@@ -253,7 +253,8 @@ def init_wandb_and_backup(config, resume=False, resume_id=None, train_step=None)
         init_kwargs["id"] = resume_id
         init_kwargs["resume"] = "allow"
         # Auto rewind to a specific step when resuming
-        init_kwargs["resume_from"] = f"{resume_id}?_step={train_step}"
+        # Note: this functionality need request from wandb team.
+        # init_kwargs["resume_from"] = f"{resume_id}?_step={train_step}"
     elif resume:
         # Best-effort resume without known id (will start new run if not resuming)
         init_kwargs["resume"] = "allow"
