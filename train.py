@@ -53,7 +53,7 @@ dist.barrier()
 # Set up wandb and backup source code
 if ddp_info.is_main_process:
     # Resume W&B if checkpoints exist to continue previous curves
-    init_wandb_and_backup(config, resume=(len(all_ckpt_paths) > 0))
+    init_wandb_and_backup(config, resume=(len(all_ckpt_paths) > 0), train_step=train_step)
 dist.barrier()
 
 
