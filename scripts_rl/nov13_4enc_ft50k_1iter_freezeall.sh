@@ -6,7 +6,7 @@ if [ -z "$BATCH_SIZE_PER_GPU" ]; then
     BATCH_SIZE_PER_GPU=4
 fi
 
-export EXP_NAME="nov13_4enc_ft40k_1iter_freezeenc"
+export EXP_NAME="nov13_4enc_ft50k_1iter_freezeall"
 export MASTER_ADDR=localhost
 export MASTER_PORT=$(python3 -c "import socket as s; x=s.socket(s.AF_INET,s.SOCK_STREAM); x.bind(('',0)); print(x.getsockname()[1]); x.close()")
 echo "EXP_NAME: $EXP_NAME"
@@ -24,7 +24,7 @@ torchrun \
     training.batch_size_per_gpu=${BATCH_SIZE_PER_GPU} \
     training.grad_checkpoint=false \
     training.seed=777 \
-    training.train_steps=60000 \
+    training.train_steps=50000 \
     training.grad_accum_steps=1 \
     training.lr=0.0001 \
     training.wandb_exp_name="${EXP_NAME}" \
@@ -54,8 +54,9 @@ torchrun \
     model.ttt.ss_4views=true \
     training.test_1enc1ss=true \
     training.test_layers=[1] \
-    training.resume_ckpt="./results/nov9_4enc_baseline/ckpt_0000000000040000.pt" \
+    training.resume_ckpt="./results/nov9_4enc_baseline/ckpt_0000000000050000.pt" \
     training.freeze_encoder=true \
+    training.freeze_decoder=true \
     training.freeze_tokenizer=true \
     training.freeze_latent=true \
     training.reset_training_state=false
