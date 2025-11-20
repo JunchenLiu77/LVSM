@@ -27,6 +27,7 @@ torchrun \
     training.train_steps=50000 \
     training.grad_accum_steps=1 \
     training.lr=0.00001 \
+    training.lr_ttt=0.0001 \
     training.wandb_exp_name="${EXP_NAME}" \
     training.checkpoint_every=500 \
     training.scheduler_type=cosine \
