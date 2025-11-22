@@ -819,6 +819,7 @@ class Images2LatentScene(nn.Module):
         ss_pose_tokens=None, 
         target_pose_tokens=None, 
         ood_target_pose_tokens=None, 
+        is_first=False,
         is_last=False,
         training=True,
         input_views_ss=False,
@@ -839,6 +840,7 @@ class Images2LatentScene(nn.Module):
             s: (Optional) Current state tensor [b, n_latent_vectors, d]
             input_pose_tokens: (Optional) Cached pose tokens for input views
             target_pose_tokens: (Optional) Cached pose tokens for target views
+            is_first: Whether this is the first iteration
             is_last: Whether to update the state
             training: gradient checkpointing will always be disabled during inference
             input_views_ss: Whether to use input views to calculate ss loss
@@ -880,61 +882,67 @@ class Images2LatentScene(nn.Module):
             s = self._maybe_corrupt_state(s)
         s = s.requires_grad_(True)
 
-        # Compute self-supervision losses which is calculated on the ss views
-        ss_loss = 0.0
-        with torch.enable_grad():
-            # calculate ss loss
-            rendered_ss, ss_pose_tokens = self.decode(ss, s, target_pose_tokens=ss_pose_tokens, training=training)
-            ss_loss_metrics = self.loss_computer(rendered_ss, ss.image)
-            ss_loss += ss_loss_metrics["loss"]
+        if not (self.config.model.ttt.supervise_s0 and is_first):
+            # if supervise s0 and this is the first iteration, we calculate target loss on the s0 state and dont do state update
+            # Compute self-supervision losses which is calculated on the ss views
+            ss_loss = 0.0
+            with torch.enable_grad():
+                # calculate ss loss
+                rendered_ss, ss_pose_tokens = self.decode(ss, s, target_pose_tokens=ss_pose_tokens, training=training)
+                ss_loss_metrics = self.loss_computer(rendered_ss, ss.image)
+                ss_loss += ss_loss_metrics["loss"]
 
-            if input_views_ss:
-                # calculate input views ss loss
-                rendered_input, _ = self.decode(input, s, training=training)
-                input_views_ss_loss_metrics = self.loss_computer(rendered_input, input.image)
-                ss_loss += input_views_ss_loss_metrics["loss"]
+                if input_views_ss:
+                    # calculate input views ss loss
+                    rendered_input, _ = self.decode(input, s, training=training)
+                    input_views_ss_loss_metrics = self.loss_computer(rendered_input, input.image)
+                    ss_loss += input_views_ss_loss_metrics["loss"]
+                
+                if ood_target_views_ss:
+                    # calculate ood target views ss loss
+                    rendered_ood_target, ood_target_pose_tokens = self.decode(ood_target, s, target_pose_tokens=ood_target_pose_tokens, training=training)
+                    ood_target_views_ss_loss_metrics = self.loss_computer(rendered_ood_target, ood_target.image)
+                    ss_loss += ood_target_views_ss_loss_metrics["loss"]
             
-            if ood_target_views_ss:
-                # calculate ood target views ss loss
-                rendered_ood_target, ood_target_pose_tokens = self.decode(ood_target, s, target_pose_tokens=ood_target_pose_tokens, training=training)
-                ood_target_views_ss_loss_metrics = self.loss_computer(rendered_ood_target, ood_target.image)
-                ss_loss += ood_target_views_ss_loss_metrics["loss"]
-        
-        # Update state with self-supervision losses except for the last layer
-        grad_norm = self.ttt_grad_normalizers[layer_idx]
-        state_norm = self.ttt_state_normalizers[layer_idx]
-        opt = self.ttt_blocks[layer_idx]
-        lrnet = None
-        if self.config.model.ttt.state_lr_mode in ["learnable"] or "adaptive" in self.config.model.ttt.state_lr_mode:
-            lrnet = self.ttt_lrnet[layer_idx]
+            # Update state with self-supervision losses except for the last layer
+            grad_norm = self.ttt_grad_normalizers[layer_idx]
+            state_norm = self.ttt_state_normalizers[layer_idx]
+            opt = self.ttt_blocks[layer_idx]
+            lrnet = None
+            if self.config.model.ttt.state_lr_mode in ["learnable"] or "adaptive" in self.config.model.ttt.state_lr_mode:
+                lrnet = self.ttt_lrnet[layer_idx]
 
-        new_s, grad_s, layer_metrics = self._update_state_with_loss(
-            s, s, grad_norm, state_norm, opt, ss_loss, lrnet,
-            need_grad=True, t=t
-        )
+            new_s, grad_s, layer_metrics = self._update_state_with_loss(
+                s, s, grad_norm, state_norm, opt, ss_loss, lrnet,
+                need_grad=True, t=t
+            )
 
-        if self.config.model.ttt.enable_unroll:
-            if input_views_ss or ood_target_views_ss:
-                raise NotImplementedError("Unroll with input views ss or ood target views ss is not supported yet")
-            # compute the ss loss again with the new state, we dont need gradient this time
-            with torch.no_grad():
-                rendered_ss, _ = self.decode(
-                    ss, new_s,
-                    target_pose_tokens=ss_pose_tokens, 
-                    training=training
-                )
-                new_ss_loss_metrics = self.loss_computer(rendered_ss, ss.image)
-            
-            # only update state if the new ss loss is smaller
-            if new_ss_loss_metrics["loss"] < ss_loss_metrics["loss"]:
-                print(f"{iter_idx}th iter new ss loss is smaller than cur ss loss: {new_ss_loss_metrics['loss']:.4f} < {ss_loss_metrics['loss']:.4f}, update the state")
-                s = new_s
-                ss_loss_metrics = new_ss_loss_metrics
+            if self.config.model.ttt.enable_unroll:
+                if input_views_ss or ood_target_views_ss:
+                    raise NotImplementedError("Unroll with input views ss or ood target views ss is not supported yet")
+                # compute the ss loss again with the new state, we dont need gradient this time
+                with torch.no_grad():
+                    rendered_ss, _ = self.decode(
+                        ss, new_s,
+                        target_pose_tokens=ss_pose_tokens, 
+                        training=training
+                    )
+                    new_ss_loss_metrics = self.loss_computer(rendered_ss, ss.image)
+                
+                # only update state if the new ss loss is smaller
+                if new_ss_loss_metrics["loss"] < ss_loss_metrics["loss"]:
+                    print(f"{iter_idx}th iter new ss loss is smaller than cur ss loss: {new_ss_loss_metrics['loss']:.4f} < {ss_loss_metrics['loss']:.4f}, update the state")
+                    s = new_s
+                    ss_loss_metrics = new_ss_loss_metrics
+                else:
+                    print(f"{iter_idx}th iter new ss loss is larger than cur ss loss: {new_ss_loss_metrics['loss']:.4f} > {ss_loss_metrics['loss']:.4f}, keep the current state")
             else:
-                print(f"{iter_idx}th iter new ss loss is larger than cur ss loss: {new_ss_loss_metrics['loss']:.4f} > {ss_loss_metrics['loss']:.4f}, keep the current state")
+                # if unroll is disabled, we use the new state directly
+                s = new_s
         else:
-            # if unroll is disabled, we use the new state directly
-            s = new_s
+            layer_metrics = {}
+            ss_loss_metrics = {}
+            rendered_ss = None
 
         if is_last:
             # render input views, only for visualization

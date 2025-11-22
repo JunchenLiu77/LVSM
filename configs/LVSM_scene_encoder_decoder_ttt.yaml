@@ -54,6 +54,7 @@ model:
     corrupt_training_images: false
     corrupt_training_states: false
     corrupt_max_t: 1.0
+    supervise_s0: false
     adam:
       lr: 1e-3
       beta1: 0.9

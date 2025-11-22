@@ -236,6 +236,10 @@ class Generator:
                 overrides.append('model.ttt.corrupt_training_states=false')
             if args.corrupt_max_t is not None:
                 overrides.append(f'model.ttt.corrupt_max_t={args.corrupt_max_t}')
+            if args.supervise_s0 is not None and args.supervise_s0:
+                overrides.append('model.ttt.supervise_s0=true')
+            elif args.no_supervise_s0 is not None and args.no_supervise_s0:
+                overrides.append('model.ttt.supervise_s0=false')
         
         # Training configuration overrides
         if args.batch_size is not None:
@@ -766,6 +770,10 @@ def main():
                         help='Do not corrupt training states for ss loss calculation (encoder-decoder-ttt)')
     parser.add_argument('--corrupt-max-t', type=float,
                         help='Maximum t for corrupt training images and states (encoder-decoder-ttt)')
+    parser.add_argument('--supervise-s0', action='store_true', default=None,
+                        help='Supervise s0 in TTT (encoder-decoder-ttt)')
+    parser.add_argument('--no-supervise-s0', action='store_true', default=None,
+                        help='Do not supervise s0 in TTT (encoder-decoder-ttt)')
     
     # Training configuration
     parser.add_argument('--batch-size', type=int,

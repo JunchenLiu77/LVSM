@@ -638,13 +638,14 @@ while cur_train_step <= total_train_steps:
         ttt_metrics = {"layers": []}
         ttt_metrics["n_iters"] = n_iters
     
-    for idx in range(n_iters):
+    for idx in range(0 if not config.model.ttt.supervise_s0 else -1, n_iters):
         with torch.autocast(
             enabled=config.training.use_amp,
             device_type="cuda",
             dtype=amp_dtype_mapping[config.training.amp_dtype],
         ):
             if is_ttt and config.model.ttt.supervise_mode == "g3r":
+                is_first = (idx == (0 if not config.model.ttt.supervise_s0 else -1))
                 is_last = (idx == n_iters - 1)
                 layer_idx = 0 # always use one layer
                 iter_idx = idx % config.model.ttt.n_iters_per_layer
@@ -671,6 +672,7 @@ while cur_train_step <= total_train_steps:
                     ss_pose_tokens=ss_pose_tokens,
                     target_pose_tokens=target_pose_tokens,
                     ood_target_pose_tokens=ood_target_pose_tokens,
+                    is_first=is_first,
                     is_last=is_last,
                     input_views_ss=config.model.ttt.ss_4views, # whether to use input views as well in calculating ss loss
                 )
@@ -786,9 +788,12 @@ while cur_train_step <= total_train_steps:
 
             if is_ttt and config.model.ttt.supervise_mode == "g3r":
                 s = s.detach().requires_grad_(True)
-                ss_pose_tokens = ss_pose_tokens.detach()
-                target_pose_tokens = target_pose_tokens.detach()
-                ood_target_pose_tokens = ood_target_pose_tokens.detach()
+                if ss_pose_tokens is not None:
+                    ss_pose_tokens = ss_pose_tokens.detach()
+                if target_pose_tokens is not None:
+                    target_pose_tokens = target_pose_tokens.detach()
+                if ood_target_pose_tokens is not None:
+                    ood_target_pose_tokens = ood_target_pose_tokens.detach()
 
     # for g3r, the lr scheduler will be updated after all the inner iterations are done
     lr_scheduler.step()
