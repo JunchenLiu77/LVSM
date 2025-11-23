@@ -282,6 +282,7 @@ while cur_train_step <= total_train_steps:
                                 ttt_metrics["n_iters"] = real_n_iters
 
                                 for idx in range(real_n_iters):
+                                    is_first = (idx == 0)
                                     is_last = (idx == real_n_iters - 1)
                                     layer_idx = 0
                                     iter_idx = idx % config.model.ttt.n_iters_per_layer
@@ -308,6 +309,7 @@ while cur_train_step <= total_train_steps:
                                         ss_pose_tokens=ss_pose_tokens,
                                         target_pose_tokens=target_pose_tokens,
                                         ood_target_pose_tokens=ood_target_pose_tokens,
+                                        is_first=is_first,
                                         is_last=is_last,
                                         input_views_ss=input_views_ss,
                                         ood_target_views_ss=ood_target_views_ss,
@@ -638,15 +640,23 @@ while cur_train_step <= total_train_steps:
         ttt_metrics = {"layers": []}
         ttt_metrics["n_iters"] = n_iters
     
-    for idx in range(0 if not config.model.ttt.supervise_s0 else -1, n_iters):
+    # Start of modification for random iter supervision
+    random_iter_supervision = config.model.ttt.get("random_iter_supervision", False)
+    iter_start = 0 if not config.model.ttt.supervise_s0 else -1
+    iter_end = random.randint(iter_start, n_iters - 1)
+    ttt_metrics["n_iters"] = iter_end + 1
+    
+    for idx in range(iter_start, iter_end + 1):
+        perform_update = (not random_iter_supervision) or (idx == iter_end)
+
         with torch.autocast(
             enabled=config.training.use_amp,
             device_type="cuda",
             dtype=amp_dtype_mapping[config.training.amp_dtype],
         ):
             if is_ttt and config.model.ttt.supervise_mode == "g3r":
-                is_first = (idx == (0 if not config.model.ttt.supervise_s0 else -1))
-                is_last = (idx == n_iters - 1)
+                is_first = (idx == iter_start)
+                is_last = (idx == iter_end)
                 layer_idx = 0 # always use one layer
                 iter_idx = idx % config.model.ttt.n_iters_per_layer
                 t = idx / n_iters
@@ -691,100 +701,101 @@ while cur_train_step <= total_train_steps:
                     training=True,
                 )
 
-        update_grads = (cur_train_step + 1) % grad_accum_steps == 0 or cur_train_step == total_train_steps
-        
-        # Only sync gradients on the final gradient accumulation step
-        if update_grads:
-            # Final step in gradient accumulation - sync gradients
-            scaler.scale(loss / grad_accum_steps).backward()
-        else:
-            # Intermediate step - don't sync yet
-            with model.no_sync():
-                scaler.scale(loss / grad_accum_steps).backward()
-
-        total_grad_norm = None
-        if update_grads:
-            skip_optimizer_step = False
-            # Skip optimizer step if loss is NaN or Inf
-            if torch.isnan(loss) or torch.isinf(loss):
-                print(f"NaN or Inf loss detected, skip this iteration")
-                skip_optimizer_step = True
-                if config.training.supervision == "target":
-                    target_loss_metrics.loss.data = torch.zeros_like(loss)
-                elif config.training.supervision == "input":
-                    input_loss_metrics.loss.data = torch.zeros_like(loss)
-
-            # Check gradient norm and update optimizer if everything is fine
-            if not skip_optimizer_step:
-                # Unscales the gradients
-                scaler.unscale_(optimizer) 
-                # For all gradients, we safely change the NaN -> 0., inf -> 1e-6, -inf -> 1e-6.
-                with torch.no_grad():
-                    for n, p in optimized_param_dict.items():
-                        if p.requires_grad and (p.grad is not None):
-                            p.grad.nan_to_num_(nan=0.0, posinf=1e-6, neginf=-1e-6)
+        if perform_update:
+            update_grads = (cur_train_step + 1) % grad_accum_steps == 0 or cur_train_step == total_train_steps
             
-                # Debug: show gradient norms for key modules to verify updates
-                # try:
-                #     if ddp_info.local_rank == 0:
-                #         mdl = model.module if hasattr(model, "module") else model
-                #         def module_grad_norm(mod):
-                #             sq = 0.0
-                #             found = False
-                #             for p in mod.parameters():
-                #                 if p.grad is not None:
-                #                     g = p.grad.detach()
-                #                     sq += float(torch.sum(g * g).item())
-                #                     found = True
-                #             return (sq ** 0.5) if found else 0.0
-                #         # latent grad norm
-                #         if hasattr(mdl, "n_light_field_latent") and isinstance(mdl.n_light_field_latent, torch.nn.Parameter):
-                #             latent_gnorm = mdl.n_light_field_latent.grad.detach().norm().item() if mdl.n_light_field_latent.grad is not None else 0.0
-                #         else:
-                #             latent_gnorm = 0.0
-                #         # image tokenizer grad norm
-                #         img_tok_gnorm = module_grad_norm(mdl.image_tokenizer) if hasattr(mdl, "image_tokenizer") else 0.0
-                #         # encoder grad norm
-                #         enc_gnorm = module_grad_norm(mdl.transformer_encoder) if hasattr(mdl, "transformer_encoder") else 0.0
-                #         # decoder grad norm
-                #         dec_gnorm = module_grad_norm(mdl.transformer_decoder) if hasattr(mdl, "transformer_decoder") else 0.0
-                #         print(f"[step {cur_train_step} iter {idx}] grad_norms: latent={latent_gnorm:.6e}, img_tokenizer={img_tok_gnorm:.6e}, encoder={enc_gnorm:.6e}, decoder={dec_gnorm:.6e}")
-                # except Exception:
-                #     pass
-
-                # visualize the grad norm of each layer of our transformer (FOR DEBUG)
-                if ddp_info.is_main_process and config.training.get("log_grad_norm_details", False):
-                    grad_norms = {}  # Dictionary to store norms per layer
-                    for name, param in model.named_parameters():
-                        if param.grad is not None:  # Some parameters might not have gradients
-                            grad_norms[name] = param.grad.detach().norm().item()  # Detach for safety
-                    for layer_name, grad_norm in grad_norms.items():
-                        wandb.log({"grad_norm_details/" + layer_name: grad_norm}, step=cur_train_step)
-
-                total_grad_norm = 0.0
-                if config.training.grad_clip_norm > 0:
-                    total_grad_norm = torch.nn.utils.clip_grad_norm_(optim_param_list, max_norm=config.training.grad_clip_norm).item()
-
-                    if total_grad_norm > config.training.grad_clip_norm * 2.0:
-                        print(f"WARNING: step {cur_train_step} {idx}th iter grad norm too large {total_grad_norm} > {config.training.grad_clip_norm * 2.0}")
-
-                    allowed_gradnorm = config.training.grad_clip_norm * config.training.get("allowed_gradnorm_factor", 5)
-                    if total_grad_norm > allowed_gradnorm:
-                        skip_optimizer_step = True
-                        print(f"WARNING: step {cur_train_step} {idx}th iter grad norm too large {total_grad_norm} > {allowed_gradnorm}, skipping optimizer step")
-
-                    # show grad norm in wandb if it's too large
-                    display_grad_norm = total_grad_norm > config.training.grad_clip_norm * 2.0 or total_grad_norm > allowed_gradnorm
-                    if display_grad_norm and ddp_info.is_main_process:
-                        wandb.log({"grad_norm": total_grad_norm}, step=cur_train_step)
-
-                # since skip flag may be updated because of grad norm, we check it again
+            # Only sync gradients on the final gradient accumulation step
+            if update_grads:
+                # Final step in gradient accumulation - sync gradients
+                scaler.scale(loss / grad_accum_steps).backward()
+            else:
+                # Intermediate step - don't sync yet
+                with model.no_sync():
+                    scaler.scale(loss / grad_accum_steps).backward()
+    
+            total_grad_norm = None
+            if update_grads:
+                skip_optimizer_step = False
+                # Skip optimizer step if loss is NaN or Inf
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"NaN or Inf loss detected, skip this iteration")
+                    skip_optimizer_step = True
+                    if config.training.supervision == "target":
+                        target_loss_metrics.loss.data = torch.zeros_like(loss)
+                    elif config.training.supervision == "input":
+                        input_loss_metrics.loss.data = torch.zeros_like(loss)
+    
+                # Check gradient norm and update optimizer if everything is fine
                 if not skip_optimizer_step:
-                    scaler.step(optimizer)
-                    cur_param_update_step += 1
-
-            scaler.update()
-            optimizer.zero_grad(set_to_none=True)
+                    # Unscales the gradients
+                    scaler.unscale_(optimizer) 
+                    # For all gradients, we safely change the NaN -> 0., inf -> 1e-6, -inf -> 1e-6.
+                    with torch.no_grad():
+                        for n, p in optimized_param_dict.items():
+                            if p.requires_grad and (p.grad is not None):
+                                p.grad.nan_to_num_(nan=0.0, posinf=1e-6, neginf=-1e-6)
+                
+                    # Debug: show gradient norms for key modules to verify updates
+                    # try:
+                    #     if ddp_info.local_rank == 0:
+                    #         mdl = model.module if hasattr(model, "module") else model
+                    #         def module_grad_norm(mod):
+                    #             sq = 0.0
+                    #             found = False
+                    #             for p in mod.parameters():
+                    #                 if p.grad is not None:
+                    #                     g = p.grad.detach()
+                    #                     sq += float(torch.sum(g * g).item())
+                    #                     found = True
+                    #             return (sq ** 0.5) if found else 0.0
+                    #         # latent grad norm
+                    #         if hasattr(mdl, "n_light_field_latent") and isinstance(mdl.n_light_field_latent, torch.nn.Parameter):
+                    #             latent_gnorm = mdl.n_light_field_latent.grad.detach().norm().item() if mdl.n_light_field_latent.grad is not None else 0.0
+                    #         else:
+                    #             latent_gnorm = 0.0
+                    #         # image tokenizer grad norm
+                    #         img_tok_gnorm = module_grad_norm(mdl.image_tokenizer) if hasattr(mdl, "image_tokenizer") else 0.0
+                    #         # encoder grad norm
+                    #         enc_gnorm = module_grad_norm(mdl.transformer_encoder) if hasattr(mdl, "transformer_encoder") else 0.0
+                    #         # decoder grad norm
+                    #         dec_gnorm = module_grad_norm(mdl.transformer_decoder) if hasattr(mdl, "transformer_decoder") else 0.0
+                    #         print(f"[step {cur_train_step} iter {idx}] grad_norms: latent={latent_gnorm:.6e}, img_tokenizer={img_tok_gnorm:.6e}, encoder={enc_gnorm:.6e}, decoder={dec_gnorm:.6e}")
+                    # except Exception:
+                    #     pass
+    
+                    # visualize the grad norm of each layer of our transformer (FOR DEBUG)
+                    if ddp_info.is_main_process and config.training.get("log_grad_norm_details", False):
+                        grad_norms = {}  # Dictionary to store norms per layer
+                        for name, param in model.named_parameters():
+                            if param.grad is not None:  # Some parameters might not have gradients
+                                grad_norms[name] = param.grad.detach().norm().item()  # Detach for safety
+                        for layer_name, grad_norm in grad_norms.items():
+                            wandb.log({"grad_norm_details/" + layer_name: grad_norm}, step=cur_train_step)
+    
+                    total_grad_norm = 0.0
+                    if config.training.grad_clip_norm > 0:
+                        total_grad_norm = torch.nn.utils.clip_grad_norm_(optim_param_list, max_norm=config.training.grad_clip_norm).item()
+    
+                        if total_grad_norm > config.training.grad_clip_norm * 2.0:
+                            print(f"WARNING: step {cur_train_step} {idx}th iter grad norm too large {total_grad_norm} > {config.training.grad_clip_norm * 2.0}")
+    
+                        allowed_gradnorm = config.training.grad_clip_norm * config.training.get("allowed_gradnorm_factor", 5)
+                        if total_grad_norm > allowed_gradnorm:
+                            skip_optimizer_step = True
+                            print(f"WARNING: step {cur_train_step} {idx}th iter grad norm too large {total_grad_norm} > {allowed_gradnorm}, skipping optimizer step")
+    
+                        # show grad norm in wandb if it's too large
+                        display_grad_norm = total_grad_norm > config.training.grad_clip_norm * 2.0 or total_grad_norm > allowed_gradnorm
+                        if display_grad_norm and ddp_info.is_main_process:
+                            wandb.log({"grad_norm": total_grad_norm}, step=cur_train_step)
+    
+                    # since skip flag may be updated because of grad norm, we check it again
+                    if not skip_optimizer_step:
+                        scaler.step(optimizer)
+                        cur_param_update_step += 1
+    
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
 
             if is_ttt and config.model.ttt.supervise_mode == "g3r":
                 s = s.detach().requires_grad_(True)

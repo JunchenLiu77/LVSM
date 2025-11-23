@@ -240,6 +240,10 @@ class Generator:
                 overrides.append('model.ttt.supervise_s0=true')
             elif args.no_supervise_s0 is not None and args.no_supervise_s0:
                 overrides.append('model.ttt.supervise_s0=false')
+            if args.random_iter_supervision is not None and args.random_iter_supervision:
+                overrides.append('model.ttt.random_iter_supervision=true')
+            elif args.no_random_iter_supervision is not None and args.no_random_iter_supervision:
+                overrides.append('model.ttt.random_iter_supervision=false')
         
         # Training configuration overrides
         if args.batch_size is not None:
@@ -774,6 +778,10 @@ def main():
                         help='Supervise s0 in TTT (encoder-decoder-ttt)')
     parser.add_argument('--no-supervise-s0', action='store_true', default=None,
                         help='Do not supervise s0 in TTT (encoder-decoder-ttt)')
+    parser.add_argument('--random-iter-supervision', action='store_true', default=None,
+                        help='Randomly supervise one iteration per data sample (encoder-decoder-ttt)')
+    parser.add_argument('--no-random-iter-supervision', action='store_true', default=None,
+                        help='Do not randomly supervise one iteration per data sample (encoder-decoder-ttt)')
     
     # Training configuration
     parser.add_argument('--batch-size', type=int,

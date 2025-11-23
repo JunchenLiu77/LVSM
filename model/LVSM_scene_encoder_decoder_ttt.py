@@ -866,7 +866,7 @@ class Images2LatentScene(nn.Module):
         assert self.config.model.ttt.distill_factor == 0.0, "distill_factor must be 0.0 for G3R supervision"
 
         if s is None:
-            assert layer_idx == 0 and iter_idx == 0, "layer_idx and iter_idx must be 0 for G3R supervision when s is not provided"
+            assert is_first, "s must be provided for G3R supervision when is_first is False"
             # use encoder to absorb input views
             if training and self.config.model.ttt.corrupt_training_images:
                 enc_input = copy.deepcopy(input)
@@ -882,7 +882,7 @@ class Images2LatentScene(nn.Module):
             s = self._maybe_corrupt_state(s)
         s = s.requires_grad_(True)
 
-        if not (self.config.model.ttt.supervise_s0 and is_first):
+        if not (self.config.model.ttt.supervise_s0 and is_first) or is_last or not training:
             # if supervise s0 and this is the first iteration, we calculate target loss on the s0 state and dont do state update
             # Compute self-supervision losses which is calculated on the ss views
             ss_loss = 0.0
@@ -903,7 +903,11 @@ class Images2LatentScene(nn.Module):
                     rendered_ood_target, ood_target_pose_tokens = self.decode(ood_target, s, target_pose_tokens=ood_target_pose_tokens, training=training)
                     ood_target_views_ss_loss_metrics = self.loss_computer(rendered_ood_target, ood_target.image)
                     ss_loss += ood_target_views_ss_loss_metrics["loss"]
-            
+        else:
+            ss_loss_metrics = None
+            rendered_ss = None
+
+        if not (self.config.model.ttt.supervise_s0 and is_first) or not training:
             # Update state with self-supervision losses except for the last layer
             grad_norm = self.ttt_grad_normalizers[layer_idx]
             state_norm = self.ttt_state_normalizers[layer_idx]
@@ -941,8 +945,6 @@ class Images2LatentScene(nn.Module):
                 s = new_s
         else:
             layer_metrics = {}
-            ss_loss_metrics = {}
-            rendered_ss = None
 
         if is_last:
             # render input views, only for visualization
