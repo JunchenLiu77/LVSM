@@ -277,13 +277,16 @@ class Dataset(Dataset):
                     zip_image_path = f"{self.zip_base_dir}/{image_path}"
                 else:
                     zip_image_path = image_path
-                with zf.open(zip_image_path) as f:
-                    # Open directly from the zip file handle to avoid duplicating bytes in memory
-                    image = Image.open(f).convert('RGB')
-                    assert image.size == (self.image_size, self.image_size), f"Image {image_path} is not {self.image_size}x{self.image_size}"
-                    image = (np.array(image) / 255.0).astype(np.float32)
-                    image = torch.from_numpy(image).permute(2, 0, 1)
-                    images.append(image)
+                try:
+                    with zf.open(zip_image_path) as f:
+                        # Open directly from the zip file handle to avoid duplicating bytes in memory
+                        image = Image.open(f).convert('RGB')
+                        assert image.size == (self.image_size, self.image_size), f"Image {image_path} is not {self.image_size}x{self.image_size}"
+                        image = (np.array(image) / 255.0).astype(np.float32)
+                        image = torch.from_numpy(image).permute(2, 0, 1)
+                        images.append(image)
+                except Exception as e:
+                    return self.__getitem__(random.randint(0, len(self) - 1))
         else:
             for image_path in image_paths:
                 abs_image_path = os.path.join(self.dataset_path, image_path)
