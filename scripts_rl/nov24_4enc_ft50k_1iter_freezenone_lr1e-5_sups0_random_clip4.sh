@@ -6,7 +6,7 @@ if [ -z "$BATCH_SIZE_PER_GPU" ]; then
     BATCH_SIZE_PER_GPU=4
 fi
 
-export EXP_NAME="nov24_4enc_ft50k_1iter_freezenone_0grad_lr1e-5_sups0_random"
+export EXP_NAME="nov24_4enc_ft50k_1iter_freezenone_lr1e-5_sups0_random_clip4"
 export MASTER_ADDR=localhost
 export MASTER_PORT=$(python3 -c "import socket as s; x=s.socket(s.AF_INET,s.SOCK_STREAM); x.bind(('',0)); print(x.getsockname()[1]); x.close()")
 echo "EXP_NAME: $EXP_NAME"
@@ -40,7 +40,7 @@ torchrun \
     training.num_ood_target_views=2 \
     training.test_every=100 \
     training.test_batch_size_per_gpu=5 \
-    training.grad_clip_norm=2.0  \
+    training.grad_clip_norm=4.0  \
     model.input_4views=true \
     model.ttt.n_blocks_per_layer=2 \
     model.ttt.n_layer=1 \
@@ -48,7 +48,7 @@ torchrun \
     model.ttt.state_lr_mode=fixed \
     model.ttt.state_lr=1.0 \
     model.ttt.opt_model=dit \
-    model.ttt.grad_mode=zero \
+    model.ttt.grad_mode=normal \
     model.ttt.detach_grad=true \
     model.ttt.supervise_mode=g3r \
     model.ttt.progressive=false \
