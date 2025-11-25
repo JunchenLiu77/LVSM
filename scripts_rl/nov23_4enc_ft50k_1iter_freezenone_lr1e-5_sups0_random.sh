@@ -40,7 +40,7 @@ torchrun \
     training.num_ood_target_views=2 \
     training.test_every=100 \
     training.test_batch_size_per_gpu=5 \
-    training.grad_clip_norm=2.0  \
+    training.grad_clip_norm=4.0  \
     model.input_4views=true \
     model.ttt.n_blocks_per_layer=2 \
     model.ttt.n_layer=1 \
