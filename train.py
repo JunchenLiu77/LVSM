@@ -638,13 +638,13 @@ while cur_train_step <= total_train_steps:
         target_pose_tokens = None
         ood_target_pose_tokens = None
         ttt_metrics = {"layers": []}
-        ttt_metrics["n_iters"] = n_iters
     
     # Start of modification for random iter supervision
-    random_iter_supervision = config.model.ttt.get("random_iter_supervision", False)
-    iter_start = 0 if not config.model.ttt.supervise_s0 else -1
+    random_iter_supervision = config.model.ttt.get("random_iter_supervision", False) if is_ttt else False
+    iter_start = -1 if is_ttt and config.model.ttt.supervise_s0 else 0
     iter_end = random.randint(iter_start, n_iters - 1)
-    ttt_metrics["n_iters"] = iter_end + 1
+    if is_ttt:
+        ttt_metrics["n_iters"] = iter_end + 1
     
     for idx in range(iter_start, iter_end + 1):
         perform_update = (not random_iter_supervision) or (idx == iter_end)
