@@ -782,8 +782,9 @@ class Images2LatentScene(nn.Module):
         # Apply update
         if self.config.model.ttt.is_residual and self.config.model.ttt.opt_model != "dit":
             new_s = s_update + (s.detach() if self.config.model.ttt.detach_residual else s)
-            # pull the new s to the same domain as previous s
-            new_s = new_s / (new_s.std(dim=(-1), keepdim=True) + 1e-10) * s_std
+            if not self.config.model.ttt.opt_model == "adam":
+                # pull the new s to the same domain as previous s
+                new_s = new_s / (new_s.std(dim=(-1), keepdim=True) + 1e-10) * s_std
         else:
             new_s = s_update[..., :self.config.model.transformer.d]
 
@@ -911,7 +912,9 @@ class Images2LatentScene(nn.Module):
             # Update state with self-supervision losses except for the last layer
             grad_norm = self.ttt_grad_normalizers[layer_idx]
             state_norm = self.ttt_state_normalizers[layer_idx]
-            opt = self.ttt_blocks[layer_idx]
+            opt = None
+            if self.config.model.ttt.opt_model != "adam":
+                opt = self.ttt_blocks[layer_idx]
             lrnet = None
             if self.config.model.ttt.state_lr_mode in ["learnable"] or "adaptive" in self.config.model.ttt.state_lr_mode:
                 lrnet = self.ttt_lrnet[layer_idx]
