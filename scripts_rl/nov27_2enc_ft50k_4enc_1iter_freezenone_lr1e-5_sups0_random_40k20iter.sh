@@ -22,7 +22,7 @@ torchrun \
     model.transformer.encoder_n_layer=6 \
     model.transformer.decoder_n_layer=6 \
     training.batch_size_per_gpu=${BATCH_SIZE_PER_GPU} \
-    training.grad_checkpoint=false \
+    training.grad_checkpoint=true \
     training.seed=777 \
     training.train_steps=50000 \
     training.grad_accum_steps=1 \

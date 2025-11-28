@@ -1,6 +1,7 @@
 # Copyright (c) 2025 Haian Jin. Created for the LVSM project (ICLR 2025).
 
 import importlib
+import gc
 import os
 import time
 import wandb
@@ -797,6 +798,9 @@ while cur_train_step <= total_train_steps:
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
 
+            # if idx % 1 == 0 and ddp_info.is_main_process:
+            #     print(f"[Iter {idx}] Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB, Max: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+
             if is_ttt and config.model.ttt.supervise_mode == "g3r":
                 s = s.detach().requires_grad_(True)
                 if ss_pose_tokens is not None:
@@ -805,6 +809,16 @@ while cur_train_step <= total_train_steps:
                     target_pose_tokens = target_pose_tokens.detach()
                 if ood_target_pose_tokens is not None:
                     ood_target_pose_tokens = ood_target_pose_tokens.detach()
+                
+                # Delete intermediate tensors of the current iteration to save memory
+                # We only need to keep the ones from the last iteration for logging
+                # if idx < iter_end:
+                #     del loss
+                #     del input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics
+                #     del rendered_input, rendered_target, rendered_ss, rendered_ood_target
+                #     del layer_metrics
+                #     gc.collect()
+                #     torch.cuda.empty_cache()
 
     # for g3r, the lr scheduler will be updated after all the inner iterations are done
     lr_scheduler.step()
