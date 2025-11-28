@@ -249,6 +249,7 @@ while cur_train_step <= total_train_steps:
         ):
             # accumulate metrics across all test batches this inference step
             metrics = {}
+            inference_times = {}
             for (batch_idx, batch) in enumerate(test_loader_iter):
                 if config.inference.get("first_n_batches", None) is not None and batch_idx >= config.inference.get("first_n_batches", None):
                     break
@@ -282,6 +283,8 @@ while cur_train_step <= total_train_steps:
                                 ttt_metrics = {"layers": []}
                                 ttt_metrics["n_iters"] = real_n_iters
 
+                                torch.cuda.synchronize()
+                                t0 = time.time()
                                 for idx in range(real_n_iters):
                                     is_first = (idx == 0)
                                     is_last = (idx == real_n_iters - 1)
@@ -315,6 +318,16 @@ while cur_train_step <= total_train_steps:
                                         input_views_ss=input_views_ss,
                                         ood_target_views_ss=ood_target_views_ss,
                                     )
+                                torch.cuda.synchronize()
+                                t1 = time.time()
+                                inference_time = (t1 - t0) / config.training.test_batch_size_per_gpu
+
+                                if n_views not in inference_times:
+                                    inference_times[n_views] = {}
+                                if real_n_iters not in inference_times[n_views]:
+                                    inference_times[n_views][real_n_iters] = []
+                                inference_times[n_views][real_n_iters].append(inference_time)
+
                             # export results with the iterations upper bound, merge per-batch
                             out_dir_nviews = os.path.join(out_dir, f"nviews_{n_views}")
                             os.makedirs(out_dir_nviews, exist_ok=True)
@@ -339,6 +352,8 @@ while cur_train_step <= total_train_steps:
                             del input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, layer_metrics, ttt_metrics, per_scene_metrics
                             torch.cuda.empty_cache()
                 else:
+                    torch.cuda.synchronize()
+                    t0 = time.time()
                     input, target, ss, ood_target, input_loss_metrics, target_loss_metrics, ss_loss_metrics, ood_target_loss_metrics, rendered_input, rendered_target, rendered_ss, rendered_ood_target, loss = model(
                         batch,
                         num_input_views=config.training.num_input_views,
@@ -348,6 +363,16 @@ while cur_train_step <= total_train_steps:
                         has_target_image=True,
                         training=False,
                     )
+                    torch.cuda.synchronize()
+                    t1 = time.time()
+                    inference_time = (t1 - t0) / config.training.test_batch_size_per_gpu
+
+                    if 0 not in inference_times:
+                        inference_times[0] = {}
+                    if 0 not in inference_times[0]:
+                        inference_times[0][0] = []
+                    inference_times[0][0].append(inference_time)
+
                     per_scene_metrics = export_results(
                         input, target, ss, ood_target,
                         rendered_input, rendered_target, rendered_ss, rendered_ood_target,
@@ -391,7 +416,28 @@ while cur_train_step <= total_train_steps:
                                     merged[k_nviews][k_iters].update(by_uid)
                         return merged
 
+                    def gather_inference_times(local_times):
+                        """
+                        Gather nested inference times from all ranks.
+                        Structure: {n_views: {n_iters: [times]}}
+                        """
+                        gathered = [None for _ in range(ddp_info.world_size)]
+                        dist.all_gather_object(gathered, local_times)
+                        merged = {}
+                        for part in gathered:
+                            if not part:
+                                continue
+                            for k_nviews, by_iters in part.items():
+                                if k_nviews not in merged:
+                                    merged[k_nviews] = {}
+                                for k_iters, times in by_iters.items():
+                                    if k_iters not in merged[k_nviews]:
+                                        merged[k_nviews][k_iters] = []
+                                    merged[k_nviews][k_iters].extend(times)
+                        return merged
+
                     metrics = gather_metrics(metrics)
+                    inference_times = gather_inference_times(inference_times)
 
                     # Save combined JSON and CSV averages, then log to wandb for each n_views and iter setting
                     n_input, n_ss, n_ood_target = config.training.num_input_views, config.training.num_ss_views, config.training.num_ood_target_views
@@ -426,6 +472,13 @@ while cur_train_step <= total_train_steps:
                                 ]
                                 summaries = [scene_metrics["summary"] for scene_metrics in all_scenes.values()]
                                 averages = {k: 0.0 for k in metric_keys}
+                                
+                                # Calculate average inference time
+                                times = inference_times.get(n_views, {}).get(real_n_iters, [])
+                                avg_inference_time = sum(times) / len(times) if len(times) > 0 else 0.0
+                                averages["inference_time"] = avg_inference_time
+                                print(f"[Test n_views={n_views} iters={real_n_iters}] Average Inference Time: {avg_inference_time:.4f}s")
+
                                 if len(summaries) > 0:
                                     for k in metric_keys:
                                         averages[k] = sum(s[k] for s in summaries) / len(summaries)
@@ -439,15 +492,15 @@ while cur_train_step <= total_train_steps:
                                     with open(csv_path, "w", newline="") as f:
                                         writer = csv.writer(f)
                                         # header
-                                        writer.writerow(["Index"] + metric_keys)
+                                        writer.writerow(["Index"] + metric_keys + ["inference_time"])
                                         # rows per scene
                                         for uid, scene in sorted(all_scenes.items(), key=lambda kv: int(kv[0]) if not isinstance(kv[0], int) else kv[0]):
                                             summary = scene.get("summary", {})
-                                            row = [f"{int(uid):06d}"] + [f"{summary.get(k, 0.0):.4f}" for k in metric_keys]
+                                            row = [f"{int(uid):06d}"] + [f"{summary.get(k, 0.0):.4f}" for k in metric_keys] + [""]
                                             writer.writerow(row)
                                         # blank line and averages
                                         writer.writerow([])
-                                        avg_row = ["average"] + [f"{averages[k]:.4f}" for k in metric_keys]
+                                        avg_row = ["average"] + [f"{averages[k]:.4f}" for k in metric_keys] + [f"{avg_inference_time:.4f}"]
                                         writer.writerow(avg_row)
                                 except Exception:
                                     pass
@@ -465,6 +518,7 @@ while cur_train_step <= total_train_steps:
                                 ood_target_psnr = averages["ood_target_psnr"]
                                 ood_target_lpips = averages["ood_target_lpips"]
                                 ood_target_ssim = averages["ood_target_ssim"]
+                                inference_time = averages["inference_time"]
                                 wandb.log({
                                     f"{test_name}/input_psnr": input_psnr,
                                     f"{test_name}/input_lpips": input_lpips,
@@ -478,6 +532,7 @@ while cur_train_step <= total_train_steps:
                                     f"{test_name}/ood_target_psnr": ood_target_psnr,
                                     f"{test_name}/ood_target_lpips": ood_target_lpips,
                                     f"{test_name}/ood_target_ssim": ood_target_ssim,
+                                    f"{test_name}/inference_time": inference_time,
                                 }, step=cur_train_step)
 
                             # log scene images to wandb, only uid 162 and 183 scenes are logged
@@ -517,8 +572,29 @@ while cur_train_step <= total_train_steps:
                                 merged[k_iters].update(by_uid)
                         return merged
 
+                    def gather_inference_times(local_times):
+                        """
+                        Gather nested inference times from all ranks.
+                        Structure: {n_views: {n_iters: [times]}}
+                        """
+                        gathered = [None for _ in range(ddp_info.world_size)]
+                        dist.all_gather_object(gathered, local_times)
+                        merged = {}
+                        for part in gathered:
+                            if not part:
+                                continue
+                            for k_nviews, by_iters in part.items():
+                                if k_nviews not in merged:
+                                    merged[k_nviews] = {}
+                                for k_iters, times in by_iters.items():
+                                    if k_iters not in merged[k_nviews]:
+                                        merged[k_nviews][k_iters] = []
+                                    merged[k_nviews][k_iters].extend(times)
+                        return merged
+
                     real_n_iters = 0
                     metrics = gather_metrics(metrics)
+                    inference_times = gather_inference_times(inference_times)
 
                     test_name = f"test_{real_n_iters}iters"
                     if ddp_info.is_main_process:
@@ -542,6 +618,13 @@ while cur_train_step <= total_train_steps:
                         ]
                         summaries = [scene_metrics["summary"] for scene_metrics in all_scenes.values()]
                         averages = {k: 0.0 for k in metric_keys}
+
+                        # Calculate average inference time
+                        times = inference_times.get(0, {}).get(0, [])
+                        avg_inference_time = sum(times) / len(times) if len(times) > 0 else 0.0
+                        averages["inference_time"] = avg_inference_time
+                        print(f"[Test Non-TTT] Average Inference Time: {avg_inference_time:.4f}s")
+
                         if len(summaries) > 0:
                             for k in metric_keys:
                                 averages[k] = sum(s[k] for s in summaries) / len(summaries)
@@ -554,15 +637,15 @@ while cur_train_step <= total_train_steps:
                             with open(csv_path, "w", newline="") as f:
                                 writer = csv.writer(f)
                                 # header
-                                writer.writerow(["Index"] + metric_keys)
+                                writer.writerow(["Index"] + metric_keys + ["inference_time"])
                                 # rows per scene
                                 for uid, scene in sorted(all_scenes.items(), key=lambda kv: int(kv[0]) if not isinstance(kv[0], int) else kv[0]):
                                     summary = scene.get("summary", {})
-                                    row = [f"{int(uid):06d}"] + [f"{summary.get(k, 0.0):.4f}" for k in metric_keys]
+                                    row = [f"{int(uid):06d}"] + [f"{summary.get(k, 0.0):.4f}" for k in metric_keys] + [""]
                                     writer.writerow(row)
                                 # blank line and averages
                                 writer.writerow([])
-                                avg_row = ["average"] + [f"{averages[k]:.4f}" for k in metric_keys]
+                                avg_row = ["average"] + [f"{averages[k]:.4f}" for k in metric_keys] + [f"{avg_inference_time:.4f}"]
                                 writer.writerow(avg_row)
                         except Exception:
                             pass
@@ -580,6 +663,7 @@ while cur_train_step <= total_train_steps:
                         ood_target_psnr = averages["ood_target_psnr"]
                         ood_target_lpips = averages["ood_target_lpips"]
                         ood_target_ssim = averages["ood_target_ssim"]
+                        inference_time = averages["inference_time"]
                         wandb.log({
                             f"{test_name}/input_psnr": input_psnr,
                             f"{test_name}/input_lpips": input_lpips,
@@ -593,6 +677,7 @@ while cur_train_step <= total_train_steps:
                             f"{test_name}/ood_target_psnr": ood_target_psnr,
                             f"{test_name}/ood_target_lpips": ood_target_lpips,
                             f"{test_name}/ood_target_ssim": ood_target_ssim,
+                            f"{test_name}/inference_time": inference_time,
                         }, step=cur_train_step)
 
                     # log scene images to wandb, only uid 162 and 183 scenes are logged
@@ -802,7 +887,9 @@ while cur_train_step <= total_train_steps:
             #     print(f"[Iter {idx}] Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB, Max: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
 
             if is_ttt and config.model.ttt.supervise_mode == "g3r":
-                s = s.detach().requires_grad_(True)
+                if config.model.ttt.opt_model != "adam":
+                    # adam always update the same state so we don't need to detach it
+                    s = s.detach().requires_grad_(True)
                 if ss_pose_tokens is not None:
                     ss_pose_tokens = ss_pose_tokens.detach()
                 if target_pose_tokens is not None:

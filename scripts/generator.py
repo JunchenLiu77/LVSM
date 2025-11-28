@@ -244,6 +244,16 @@ class Generator:
                 overrides.append('model.ttt.random_iter_supervision=true')
             elif args.no_random_iter_supervision is not None and args.no_random_iter_supervision:
                 overrides.append('model.ttt.random_iter_supervision=false')
+            if args.ttt_adam_lr is not None:
+                overrides.append(f'model.ttt.adam.lr={args.ttt_adam_lr}')
+            if args.ttt_adam_beta1 is not None:
+                overrides.append(f'model.ttt.adam.beta1={args.ttt_adam_beta1}')
+            if args.ttt_adam_beta2 is not None:
+                overrides.append(f'model.ttt.adam.beta2={args.ttt_adam_beta2}')
+            if args.ttt_adam_eps is not None:
+                overrides.append(f'model.ttt.adam.eps={args.ttt_adam_eps}')
+            if args.ttt_adam_weight_decay is not None:
+                overrides.append(f'model.ttt.adam.weight_decay={args.ttt_adam_weight_decay}')
         
         # Training configuration overrides
         if args.batch_size is not None:

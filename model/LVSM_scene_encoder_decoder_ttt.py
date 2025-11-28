@@ -678,29 +678,45 @@ class Images2LatentScene(nn.Module):
         
         # update state with loss
         if self.config.model.ttt.opt_model == "adam":
-            # Create Adam optimizer with the current state as parameter
-            state_param = nn.Parameter(s.clone().detach().requires_grad_(True))
-            state_param.grad = grad_s_normed
-            
-            # Get Adam hyperparameters
-            adam_lr = self.config.model.ttt.adam.lr
-            adam_beta1 = self.config.model.ttt.adam.beta1
-            adam_beta2 = self.config.model.ttt.adam.beta2
-            adam_eps = self.config.model.ttt.adam.eps
-            adam_weight_decay = self.config.model.ttt.adam.weight_decay
-            
-            # Create Adam optimizer
-            optimizer = torch.optim.Adam(
-                [state_param], 
-                lr=adam_lr, 
-                betas=(adam_beta1, adam_beta2), 
-                eps=adam_eps, 
-                weight_decay=adam_weight_decay
-            )
-            
+            # If ttt block is None, we initialize it as a adam optimizer with the current state
+            if self.ttt_blocks is None:
+                self.ttt_blocks = torch.optim.Adam(
+                    [s], 
+                    lr=self.config.model.ttt.adam.lr, 
+                    betas=(self.config.model.ttt.adam.beta1, self.config.model.ttt.adam.beta2), 
+                    eps=self.config.model.ttt.adam.eps, 
+                    weight_decay=self.config.model.ttt.adam.weight_decay
+                )
             # update the state
-            optimizer.step()
-            delta_s = state_param.data - s
+            self.ttt_blocks.zero_grad()
+            s.grad = grad_s_normed
+            self.ttt_blocks.step()
+
+            return s, grad_s, layer_metrics
+            
+            # # Create Adam optimizer with the current state as parameter
+            # state_param = nn.Parameter(s.clone().detach().requires_grad_(True))
+            # state_param.grad = grad_s_normed
+            
+            # # Get Adam hyperparameters
+            # adam_lr = self.config.model.ttt.adam.lr
+            # adam_beta1 = self.config.model.ttt.adam.beta1
+            # adam_beta2 = self.config.model.ttt.adam.bet
+            # adam_eps = self.config.model.ttt.adam.eps
+            # adam_weight_decay = self.config.model.ttt.adam.weight_decay
+            
+            # # Create Adam optimizer
+            # optimizer = torch.optim.Adam(
+            #     [state_param], 
+            #     lr=adam_lr, 
+            #     betas=(adam_beta1, adam_beta2), 
+            #     eps=adam_eps, 
+            #     weight_decay=adam_weight_decay
+            # )
+            
+            # # update the state
+            # optimizer.step()
+            # delta_s = state_param.data - s
         else:
             if self.config.model.ttt.opt_model == "transformer3":
                 opt_input = grad_s_normed # [b, n_latent_vectors, d]
@@ -878,6 +894,12 @@ class Images2LatentScene(nn.Module):
                 s = self.encode(enc_input, ss, training=training)
             else:
                 s = self.encode(enc_input, training=training)
+
+            if self.config.model.ttt.opt_model == "adam":
+                # Reset the optimizer for the new sample
+                self.ttt_blocks = None
+                # detach the state to make a leaf node
+                s = s.detach()
         
         if training and self.config.model.ttt.corrupt_training_states:
             s = self._maybe_corrupt_state(s)
