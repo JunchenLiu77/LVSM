@@ -911,13 +911,17 @@ class Images2LatentScene(nn.Module):
             ss_loss = 0.0
             with torch.enable_grad():
                 # calculate ss loss
+                print(f"[{iter_idx}th iter] before decode ss, max memory allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB, allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
                 rendered_ss, ss_pose_tokens = self.decode(ss, s, target_pose_tokens=ss_pose_tokens, training=training)
+                print(f"[{iter_idx}th iter] after decode ss, max memory allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB, allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
                 ss_loss_metrics = self.loss_computer(rendered_ss, ss.image)
                 ss_loss += ss_loss_metrics["loss"]
 
                 if input_views_ss:
                     # calculate input views ss loss
+                    print(f"[{iter_idx}th iter] before decode input, max memory allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB, allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
                     rendered_input, _ = self.decode(input, s, training=training)
+                    print(f"[{iter_idx}th iter] after decode input, max memory allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB, allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
                     input_views_ss_loss_metrics = self.loss_computer(rendered_input, input.image)
                     ss_loss += input_views_ss_loss_metrics["loss"]
                 
@@ -983,11 +987,15 @@ class Images2LatentScene(nn.Module):
             layer_metrics["input_loss"] = 0.0
         
         # calculate loss on target and ood target views
+        print(f"[{iter_idx}th iter] before decode target, max memory allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB, allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         rendered_target, target_pose_tokens = self.decode(target, s, target_pose_tokens=target_pose_tokens, training=training)
+        print(f"[{iter_idx}th iter] after decode target, max memory allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB, allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         target_loss_metrics = self.loss_computer(rendered_target, target.image)
         layer_metrics["target_loss"] = target_loss_metrics["loss"].item()
 
+        print(f"[{iter_idx}th iter] before decode ood target, max memory allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB, allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         rendered_ood_target, ood_target_pose_tokens = self.decode(ood_target, s, target_pose_tokens=ood_target_pose_tokens, training=training)
+        print(f"[{iter_idx}th iter] after decode ood target, max memory allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB, allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         ood_target_loss_metrics = self.loss_computer(rendered_ood_target, ood_target.image)
         layer_metrics["ood_target_loss"] = ood_target_loss_metrics["loss"].item()
 
