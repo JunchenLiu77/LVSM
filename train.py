@@ -257,7 +257,8 @@ while cur_train_step <= total_train_steps:
                 batch = {k: v.to(ddp_info.device) if type(v) == torch.Tensor else v for k, v in batch.items()}
                 if is_ttt:
                     n_input, n_ss, n_ood_target = config.training.num_input_views, config.training.num_ss_views, config.training.num_ood_target_views
-                    for n_views in [n_ss, n_ss + n_input, n_ss + n_input + n_ood_target]:
+                    # for n_views in [n_ss, n_ss + n_input, n_ss + n_input + n_ood_target]:
+                    for n_views in [n_ss + n_input]:
                         input_views_ss = ood_target_views_ss = False
                         if n_views >= n_ss + n_input:
                             # use input views to calculate ss loss
@@ -697,6 +698,7 @@ while cur_train_step <= total_train_steps:
                                 f"{test_name}/uid_{uid}/ss": wandb.Image(ss_img),
                                 f"{test_name}/uid_{uid}/ood_target": wandb.Image(ood_target_img),
                             }, step=cur_train_step)
+            dist.barrier()
 
     try:
         data = next(train_loader_iter)
@@ -729,11 +731,19 @@ while cur_train_step <= total_train_steps:
     random_iter_supervision = config.model.ttt.get("random_iter_supervision", False) if is_ttt else False
     iter_start = -1 if is_ttt and config.model.ttt.supervise_s0 else 0
     iter_end = random.randint(iter_start, n_iters - 1)
+
+    # Synchronize iter_end across all ranks to avoid deadlock in DDP
+    if is_ttt and ddp_info.world_size > 1:
+        iter_end_tensor = torch.tensor(iter_end, device=ddp_info.device)
+        dist.broadcast(iter_end_tensor, src=0)
+        iter_end = iter_end_tensor.item()
+
     if is_ttt:
         ttt_metrics["n_iters"] = iter_end + 1
     
     for idx in range(iter_start, iter_end + 1):
-        perform_update = (not random_iter_supervision) or (idx == iter_end)
+        is_first = (idx == iter_start)
+        is_last = (idx == iter_end)
 
         with torch.autocast(
             enabled=config.training.use_amp,
@@ -741,8 +751,6 @@ while cur_train_step <= total_train_steps:
             dtype=amp_dtype_mapping[config.training.amp_dtype],
         ):
             if is_ttt and config.model.ttt.supervise_mode == "g3r":
-                is_first = (idx == iter_start)
-                is_last = (idx == iter_end)
                 layer_idx = 0 # always use one layer
                 iter_idx = idx % config.model.ttt.n_iters_per_layer
                 t = idx / n_iters
@@ -787,7 +795,7 @@ while cur_train_step <= total_train_steps:
                     training=True,
                 )
 
-        if perform_update:
+        if (not random_iter_supervision) or is_last:
             update_grads = (cur_train_step + 1) % grad_accum_steps == 0 or cur_train_step == total_train_steps
             
             # Only sync gradients on the final gradient accumulation step
@@ -883,10 +891,7 @@ while cur_train_step <= total_train_steps:
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
 
-            # if idx % 1 == 0 and ddp_info.is_main_process:
-            #     print(f"[Iter {idx}] Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB, Max: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
-
-            if is_ttt and config.model.ttt.supervise_mode == "g3r":
+            if is_ttt and config.model.ttt.supervise_mode == "g3r" and not is_last:
                 if config.model.ttt.opt_model != "adam":
                     # adam always update the same state so we don't need to detach it
                     s = s.detach().requires_grad_(True)
